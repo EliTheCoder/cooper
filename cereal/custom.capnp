@@ -194,6 +194,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   aTarget @5 :Float32;
   events @6 :List(OnroadEventSP.Event);
   e2eAlerts @7 :E2eAlerts;
+  leadFollow @8 :LeadFollow;
 
   struct DynamicExperimentalControl {
     state @0 :DynamicExperimentalControlState;
@@ -290,6 +291,13 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     sccVision @1;
     sccMap @2;
     speedLimitAssist @3;
+    leadFollow @4;
+  }
+
+  struct LeadFollow {
+    enabled @0 :Bool;
+    active @1 :Bool;
+    vTarget @2 :Float32;
   }
 
   struct E2eAlerts {
