@@ -19,9 +19,11 @@ MIN_FOLLOW_DIST = 8.0  # meters — floor so we still maintain gap at very low s
 # e.g. 20 m too far → +2 m/s above lead speed to close the gap.
 DIST_GAIN = 0.1      # (m/s) / m
 
-# Maximum speed adjustment in either direction from the lead's absolute speed.
-# Keeps corrections gentle — ≈10 kph band.
-MAX_SPEED_ADJ = 2.8  # m/s  (~10 kph / 6 mph)
+# Asymmetric speed adjustment limits.
+# Closing the gap (lead far): small cap to avoid aggressive acceleration toward the lead.
+# Opening the gap (lead close): larger cap to shed speed quickly when following too closely.
+MAX_SPEED_ADJ_CLOSE =  0.5  # m/s — max increase above lead speed to close a distant gap
+MAX_SPEED_ADJ_OPEN  =  2.8  # m/s (~10 kph) — max decrease below lead speed to open a close gap
 
 
 class LeadFollowController:
@@ -33,13 +35,13 @@ class LeadFollowController:
     speed_adj = clip(DIST_GAIN * (dRel - desired_dist), -MAX_SPEED_ADJ, +MAX_SPEED_ADJ)
     output_v_target = max(v_lead + speed_adj, 0)
 
-  - Lead too close  -> negative adj -> target below lead speed -> ICBM slows set speed
-  - Lead too far    -> positive adj -> target above lead speed -> ICBM raises set speed
+  - Lead too close  -> negative adj (up to -MAX_SPEED_ADJ_OPEN)  -> ICBM slows set speed
+  - Lead too far    -> positive adj (capped at +MAX_SPEED_ADJ_CLOSE) -> ICBM nudges set speed up
   - Lead at ideal distance -> adj ~= 0 -> target matches lead speed
 
-  The min() in update_targets ensures this never raises the cruise set speed above
-  the user's chosen limit, so it only speeds up to close a gap when there is room
-  within the existing set speed.
+  The positive cap is intentionally small so the controller is conservative about
+  closing a gap — it mostly acts as a speed limiter that follows the lead down,
+  with only a gentle nudge to recover distance when the lead pulls ahead.
 
   When no lead is present output_v_target is V_CRUISE_UNSET (no constraint).
   """
@@ -68,7 +70,7 @@ class LeadFollowController:
     if self.is_active:
       desired_dist = max(v_ego * T_GAP, MIN_FOLLOW_DIST)
       dist_error = lead.dRel - desired_dist
-      speed_adj = max(-MAX_SPEED_ADJ, min(MAX_SPEED_ADJ, DIST_GAIN * dist_error))
+      speed_adj = max(-MAX_SPEED_ADJ_OPEN, min(MAX_SPEED_ADJ_CLOSE, DIST_GAIN * dist_error))
       self.output_v_target = max(lead.vLead + speed_adj, 0.0)
     else:
       self.output_v_target = V_CRUISE_UNSET
