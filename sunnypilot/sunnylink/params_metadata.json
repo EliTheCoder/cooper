@@ -392,6 +392,10 @@
       }
     ]
   },
+  "ICBMLeadFollow": {
+    "title": "ICBM Lead Follow",
+    "description": "Adjusts cruise set speed to follow the lead car's speed, with distance-based corrections to maintain a safe following gap."
+  },
   "InstallDate": {
     "title": "Install Date",
     "description": ""

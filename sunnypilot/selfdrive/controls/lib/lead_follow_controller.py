@@ -13,7 +13,7 @@ from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 # Desired following gap expressed as a time headway.
 # desired_dist = max(v_ego * T_GAP, MIN_FOLLOW_DIST)
 T_GAP = 2.0          # seconds
-MIN_FOLLOW_DIST = 8.0  # metres — floor so we still maintain gap at very low speeds
+MIN_FOLLOW_DIST = 8.0  # meters — floor so we still maintain gap at very low speeds
 
 # Proportional gain: how many m/s to adjust per metre of distance error.
 # e.g. 20 m too far → +2 m/s above lead speed to close the gap.
@@ -33,9 +33,9 @@ class LeadFollowController:
     speed_adj = clip(DIST_GAIN * (dRel - desired_dist), -MAX_SPEED_ADJ, +MAX_SPEED_ADJ)
     output_v_target = max(v_lead + speed_adj, 0)
 
-  - Lead too close  → negative adj → target below lead speed → ICBM slows set speed
-  - Lead too far    → positive adj → target above lead speed → ICBM raises set speed
-  - Lead at ideal distance → adj ≈ 0 → target matches lead speed
+  - Lead too close  -> negative adj -> target below lead speed -> ICBM slows set speed
+  - Lead too far    -> positive adj -> target above lead speed -> ICBM raises set speed
+  - Lead at ideal distance -> adj ~= 0 -> target matches lead speed
 
   The min() in update_targets ensures this never raises the cruise set speed above
   the user's chosen limit, so it only speeds up to close a gap when there is room
