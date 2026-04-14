@@ -15,7 +15,7 @@ from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 T_GAP = 2.0          # seconds
 MIN_FOLLOW_DIST = 8.0  # meters — floor so we still maintain gap at very low speeds
 
-# Proportional gain: how many m/s to adjust per metre of distance error.
+# Proportional gain: how many m/s to adjust per meter of distance error.
 # e.g. 20 m too far → +2 m/s above lead speed to close the gap.
 DIST_GAIN = 0.1      # (m/s) / m
 
