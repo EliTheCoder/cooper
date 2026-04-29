@@ -39,7 +39,7 @@ class LeadFollowController:
   Computes a desired following distance (time-gap from ego speed), then uses a
   PD controller on the distance error to offset the lead's absolute speed:
 
-    speed_adj = clip(KP * (dRel - desired_dist) + KD * vRel + KFF * aLead, -MAX_SPEED_ADJ, +MAX_SPEED_ADJ)
+    speed_adj = clip(KP * (dRel - desired_dist) + KD * vRel + KFF * aLeadK, -MAX_SPEED_ADJ, +MAX_SPEED_ADJ)
     output_v_target = max(v_lead + speed_adj, 0)
 
   The D term uses vRel (= d(dRel)/dt) directly, so the controller reacts to a
@@ -78,7 +78,7 @@ class LeadFollowController:
     if self.is_active:
       desired_dist = max(v_ego * T_GAP, MIN_FOLLOW_DIST)
       dist_error = lead.dRel - desired_dist
-      speed_adj = max(-MAX_SPEED_ADJ, min(MAX_SPEED_ADJ, KP * dist_error + KD * lead.vRel + KFF * lead.aLead))
+      speed_adj = max(-MAX_SPEED_ADJ, min(MAX_SPEED_ADJ, KP * dist_error + KD * lead.vRel + KFF * lead.aLeadK))
       self.output_v_target = max(lead.vLead + speed_adj, 0.0)
     else:
       self.output_v_target = V_CRUISE_UNSET
