@@ -17,17 +17,20 @@ MIN_FOLLOW_DIST = 8.0  # meters — floor so we still maintain gap at very low s
 
 # PD controller gains.
 # P: speed adjustment per meter of distance error.
-KP = 0.1   # (m/s) / m
+KP = 0.15  # (m/s) / m
 # D: speed adjustment based on relative velocity (vRel = d(dRel)/dt).
 #    Negative vRel means the gap is closing — D term reacts before the distance
 #    error grows large.
 KD = 0.3   # dimensionless (vRel is already in m/s)
+# F: feed-forward on lead acceleration — reacts to the cause before the gap error builds.
+#    Kept small because aLead from radar is noisy (differentiated signal).
+KFF = 0.4  # (m/s) / (m/s²)
 
-# Asymmetric speed adjustment limits.
-# Closing the gap (lead far): small cap to avoid aggressive acceleration toward the lead.
-# Opening the gap (lead close): larger cap to shed speed quickly when following too closely.
-MAX_SPEED_ADJ_CLOSE =  0.5  # m/s — max increase above lead speed to close a distant gap
-MAX_SPEED_ADJ_OPEN  =  2.8  # m/s (~10 kph) — max decrease below lead speed to open a close gap
+# Symmetric speed adjustment limits.
+MAX_SPEED_ADJ = 3.0  # m/s — max speed adjustment in either direction
+
+# Minimum modelProb to treat a radar lead as valid.
+MIN_LEAD_PROB = 0.5
 
 
 class LeadFollowController:
@@ -36,7 +39,7 @@ class LeadFollowController:
   Computes a desired following distance (time-gap from ego speed), then uses a
   PD controller on the distance error to offset the lead's absolute speed:
 
-    speed_adj = clip(KP * (dRel - desired_dist) + KD * vRel, -MAX_SPEED_ADJ_OPEN, +MAX_SPEED_ADJ_CLOSE)
+    speed_adj = clip(KP * (dRel - desired_dist) + KD * vRel + KFF * aLead, -MAX_SPEED_ADJ, +MAX_SPEED_ADJ)
     output_v_target = max(v_lead + speed_adj, 0)
 
   The D term uses vRel (= d(dRel)/dt) directly, so the controller reacts to a
@@ -45,9 +48,8 @@ class LeadFollowController:
   No I term: ICBM itself acts as an integrator (continuously pressing buttons
   until the set speed reaches v_target), so adding I here would double-integrate.
 
-  The positive cap is intentionally small — the controller mostly acts as a speed
-  limiter that follows the lead down, with only a gentle nudge to recover distance
-  when the lead pulls ahead.
+  Only activates when the lead's modelProb exceeds MIN_LEAD_PROB, to avoid
+  reacting to uncertain detections.
 
   When no lead is present output_v_target is V_CRUISE_UNSET (no constraint).
   """
@@ -71,12 +73,12 @@ class LeadFollowController:
     self.is_enabled = self.enabled and long_enabled
 
     lead = sm['radarState'].leadOne
-    self.is_active = self.is_enabled and lead.status and not long_override
+    self.is_active = self.is_enabled and lead.status and lead.modelProb >= MIN_LEAD_PROB and not long_override
 
     if self.is_active:
       desired_dist = max(v_ego * T_GAP, MIN_FOLLOW_DIST)
       dist_error = lead.dRel - desired_dist
-      speed_adj = max(-MAX_SPEED_ADJ_OPEN, min(MAX_SPEED_ADJ_CLOSE, KP * dist_error + KD * lead.vRel))
+      speed_adj = max(-MAX_SPEED_ADJ, min(MAX_SPEED_ADJ, KP * dist_error + KD * lead.vRel + KFF * lead.aLead))
       self.output_v_target = max(lead.vLead + speed_adj, 0.0)
     else:
       self.output_v_target = V_CRUISE_UNSET
