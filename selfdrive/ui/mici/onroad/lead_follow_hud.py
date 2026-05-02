@@ -32,18 +32,21 @@ class LeadFollowHUD(Widget):
 
   def _update_state(self):
     sm = ui_state.sm
-    lf = sm['longitudinalPlanSP'].leadFollow
-    self._enabled = lf.enabled
-    self._active = lf.active
-    self._v_target = lf.vTarget
+    if sm.valid['longitudinalPlanSP']:
+      lf = sm['longitudinalPlanSP'].leadFollow
+      self._enabled = lf.enabled
+      self._active = lf.active
+      self._v_target = lf.vTarget
 
-    lead = sm['radarState'].leadOne
-    self._d_rel = lead.dRel
-    self._v_lead = lead.vLead
-    self._v_rel = lead.vRel
-    self._model_prob = lead.modelProb
+    if sm.valid['radarState']:
+      lead = sm['radarState'].leadOne
+      self._d_rel = lead.dRel
+      self._v_lead = lead.vLead
+      self._v_rel = lead.vRel
+      self._model_prob = lead.modelProb
 
-    self._v_ego = sm['carState'].vEgo
+    if sm.valid['carState']:
+      self._v_ego = sm['carState'].vEgo
 
   def _render(self, rect: rl.Rectangle):
     if not self._enabled:
