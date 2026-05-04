@@ -144,6 +144,7 @@ class LongitudinalPlannerSP:
     leadFollow.enabled = self.lfc.is_enabled
     leadFollow.active = self.lfc.is_active
     leadFollow.vTarget = float(self.lfc.output_v_target)
+    leadFollow.dRelEma = float(self.lfc.d_rel_ema)
 
     # E2E Alerts
     e2eAlerts = longitudinalPlanSP.e2eAlerts

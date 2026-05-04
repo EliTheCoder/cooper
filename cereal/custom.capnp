@@ -298,6 +298,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     enabled @0 :Bool;
     active @1 :Bool;
     vTarget @2 :Float32;
+    dRelEma @3 :Float32;
   }
 
   struct E2eAlerts {
