@@ -70,7 +70,9 @@ class LongitudinalPlannerSP:
     self.lfc.update(sm, long_enabled, long_override, v_ego)
 
     # Model Longitudinal Control — replaces lead follow when ICBMModelLong is enabled
-    self.mlc.update(sm, long_enabled, long_override, v_ego)
+    # self.v_desired_trajectory is from the previous MPC cycle (overwritten after update_targets returns)
+    prev_speeds = getattr(self, 'v_desired_trajectory', None)
+    self.mlc.update(sm, long_enabled, long_override, v_ego, prev_speeds=prev_speeds)
     lead_follow_v = self.mlc.output_v_target if self.mlc.is_active else self.lfc.output_v_target
     lead_follow_a = self.mlc.output_a_target if self.mlc.is_active else self.lfc.output_a_target
 
