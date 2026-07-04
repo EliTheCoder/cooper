@@ -12,6 +12,7 @@ from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
 from openpilot.sunnypilot.selfdrive.controls.lib.e2e_alerts_helper import E2EAlertsHelper
 from openpilot.sunnypilot.selfdrive.controls.lib.lead_follow_controller import LeadFollowController
+from openpilot.sunnypilot.selfdrive.controls.lib.model_longitudinal_controller import ModelLongitudinalController
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.smart_cruise_control import SmartCruiseControl
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_assist import SpeedLimitAssist
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_resolver import SpeedLimitResolver
@@ -31,6 +32,7 @@ class LongitudinalPlannerSP:
     self.resolver = SpeedLimitResolver()
     self.sla = SpeedLimitAssist(CP, CP_SP)
     self.lfc = LeadFollowController()
+    self.mlc = ModelLongitudinalController()
     self.generation = int(model_bundle.generation) if (model_bundle := get_active_bundle()) else None
     self.source = LongitudinalPlanSource.cruise
     self.e2e_alerts_helper = E2EAlertsHelper()
@@ -67,12 +69,17 @@ class LongitudinalPlannerSP:
     # Lead Follow
     self.lfc.update(sm, long_enabled, long_override, v_ego)
 
+    # Model Longitudinal Control — replaces lead follow when ICBMModelLong is enabled
+    self.mlc.update(sm, long_enabled, long_override, v_ego)
+    lead_follow_v = self.mlc.output_v_target if self.mlc.is_active else self.lfc.output_v_target
+    lead_follow_a = self.mlc.output_a_target if self.mlc.is_active else self.lfc.output_a_target
+
     targets = {
       LongitudinalPlanSource.cruise: (v_cruise, a_ego),
       LongitudinalPlanSource.sccVision: (self.scc.vision.output_v_target, self.scc.vision.output_a_target),
       LongitudinalPlanSource.sccMap: (self.scc.map.output_v_target, self.scc.map.output_a_target),
       LongitudinalPlanSource.speedLimitAssist: (self.sla.output_v_target, self.sla.output_a_target),
-      LongitudinalPlanSource.leadFollow: (self.lfc.output_v_target, self.lfc.output_a_target),
+      LongitudinalPlanSource.leadFollow: (lead_follow_v, lead_follow_a),
     }
 
     self.source = min(targets, key=lambda k: targets[k][0])
