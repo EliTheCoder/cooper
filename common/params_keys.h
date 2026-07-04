@@ -271,6 +271,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
 
     // ICBM Lead Follow
     {"ICBMLeadFollow", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // ICBM Model Longitudinal
+    {"ICBMModelLong", {PERSISTENT | BACKUP, BOOL, "0"}},
 
     // Torque lateral control custom params
     {"CustomTorqueParams", {PERSISTENT | BACKUP , BOOL}},
