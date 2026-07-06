@@ -4,7 +4,6 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
-import numpy as np
 import cereal.messaging as messaging
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
@@ -13,19 +12,24 @@ from openpilot.sunnypilot import PARAMS_UPDATE_PERIOD
 
 
 class ModelLongitudinalController:
-  """ICBM source: drives cruise set-speed from the MPC planned speed trajectory.
+  """ICBM source: adjusts cruise set-speed using the model's deceleration intent.
 
   When enabled (ICBMModelLong param), replaces the lead-follow P-controller.
-  Uses the previous cycle's MPC v_desired_trajectory[-1] (~1.6 s ahead) as the
-  cruise target. The MPC already accounts for the model's intent, speed limits,
-  and safety constraints, and naturally recovers to the user's set speed when
-  the road clears — no manual filtering or time-horizon tuning required.
 
-  Falls back to modelV2.action.desiredAcceleration integrated over 2 s if no
-  trajectory is available (e.g. first frame).
+  When the model is neutral or wants to accelerate (desiredAcceleration >= 0),
+  outputs the car's actual reported cruise set-speed so ICBM holds steady and
+  lets native cruise handle any acceleration to target.
+
+  When the model wants to slow (desiredAcceleration < 0, e.g. lead car ahead or
+  curve), outputs v_ego + a_model * DECEL_HORIZON — a projected lower speed —
+  so ICBM presses decrease to bring cruise set-speed down.
+
+  This avoids the feedback loop that arises from using v_desired_trajectory:
+  that trajectory is set by the MPC with MLC's own output as v_cruise, so any
+  value below v_cruise spirals the target down to v_ego each cycle.
   """
 
-  FALLBACK_HORIZON = 2.0  # seconds, used only when no MPC trajectory is available
+  DECEL_HORIZON = 5.0  # seconds to project deceleration intent forward
 
   def __init__(self):
     self.params = Params()
@@ -41,7 +45,7 @@ class ModelLongitudinalController:
       self.enabled = self.params.get_bool("ICBMModelLong")
 
   def update(self, sm: messaging.SubMaster, long_enabled: bool, long_override: bool, v_ego: float,
-             prev_speeds: np.ndarray | None = None) -> None:
+             prev_speeds=None) -> None:
     self.frame += 1
     self._update_params()
 
@@ -49,15 +53,19 @@ class ModelLongitudinalController:
     self.is_active = self.is_enabled and not long_override
 
     if self.is_active:
-      if prev_speeds is not None and len(prev_speeds) > 0:
-        # MPC planned speed ~1.6 s ahead — smooth, constrained, recovers naturally
-        self.output_v_target = max(0.0, float(prev_speeds[-1]))
-        self.output_a_target = 0.0
+      a_model = sm['modelV2'].action.desiredAcceleration
+      cruise_speed = sm['carState'].cruiseState.speed  # m/s, from car's CAN (e.g. LVR12 for non-SCC)
+
+      if cruise_speed > 0 and a_model >= 0:
+        # Model neutral or accelerating: hold at current cruise set-speed.
+        # Native cruise handles any acceleration to the set target.
+        self.output_v_target = cruise_speed
       else:
-        # Fallback: integrate model's desired acceleration (first frame only)
-        a_model = sm['modelV2'].action.desiredAcceleration
-        self.output_v_target = max(0.0, v_ego + a_model * self.FALLBACK_HORIZON)
-        self.output_a_target = a_model
+        # Model wants to slow down (or no cruise reference): project forward.
+        # ICBM sees a target below current cruise and presses decrease.
+        self.output_v_target = max(0.0, v_ego + a_model * self.DECEL_HORIZON)
+
+      self.output_a_target = 0.0
     else:
       self.output_v_target = V_CRUISE_UNSET
       self.output_a_target = 0.0
