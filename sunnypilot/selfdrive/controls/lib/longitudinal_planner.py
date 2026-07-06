@@ -69,22 +69,40 @@ class LongitudinalPlannerSP:
     # Lead Follow
     self.lfc.update(sm, long_enabled, long_override, v_ego)
 
-    # Model Longitudinal Control — replaces lead follow when ICBMModelLong is enabled
-    self.mlc.update(sm, long_enabled, long_override, v_ego)
-    lead_follow_v = self.mlc.output_v_target if self.mlc.is_active else self.lfc.output_v_target
-    lead_follow_a = self.mlc.output_a_target if self.mlc.is_active else self.lfc.output_a_target
+    # Model Longitudinal Control: reads the previous cycle's MPC trajectory.
+    # prev_speeds is v_desired_trajectory on the parent LongitudinalPlanner instance,
+    # which was set by the MPC *after* update_targets ran last cycle.
+    prev_speeds = getattr(self, 'v_desired_trajectory', None)
+    self.mlc.update(sm, long_enabled, long_override, v_ego, prev_speeds=prev_speeds)
 
+    # MPC targets: LFC drives the leadFollow source. MLC must NOT enter this dict —
+    # putting MLC's output here as v_cruise would create a feedback loop where a
+    # sub-cruise value causes the MPC trajectory to drop, MLC reads that lower
+    # trajectory, produces an even lower target, and the set-speed spirals to v_ego.
     targets = {
       LongitudinalPlanSource.cruise: (v_cruise, a_ego),
       LongitudinalPlanSource.sccVision: (self.scc.vision.output_v_target, self.scc.vision.output_a_target),
       LongitudinalPlanSource.sccMap: (self.scc.map.output_v_target, self.scc.map.output_a_target),
       LongitudinalPlanSource.speedLimitAssist: (self.sla.output_v_target, self.sla.output_a_target),
-      LongitudinalPlanSource.leadFollow: (lead_follow_v, lead_follow_a),
+      LongitudinalPlanSource.leadFollow: (self.lfc.output_v_target, self.lfc.output_a_target),
     }
 
     self.source = min(targets, key=lambda k: targets[k][0])
-    self.output_v_target, self.output_a_target = targets[self.source]
-    return self.output_v_target, self.output_a_target
+    mpc_v, mpc_a = targets[self.source]
+
+    # LP_SP.vTarget (published for ICBM): use MLC's trajectory-based output when
+    # active; otherwise mirror the MPC target so non-MLC behaviour is unchanged.
+    if self.mlc.is_active:
+      self.output_v_target = self.mlc.output_v_target
+      self.output_a_target = self.mlc.output_a_target
+    else:
+      self.output_v_target = mpc_v
+      self.output_a_target = mpc_a
+
+    # Return the MPC target, not self.output_v_target — the caller uses this as
+    # v_cruise for the MPC solver, so it must reflect the real cruise/lead/SLA
+    # constraints, not the ICBM target.
+    return mpc_v, mpc_a
 
   def update(self, sm: messaging.SubMaster) -> None:
     self.events_sp.clear()
