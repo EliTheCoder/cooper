@@ -3,7 +3,7 @@ import numpy as np
 from openpilot.cereal import custom
 from opendbc.car import structs
 from openpilot.common.test import OpenpilotTestCase
-from openpilot.sunnypilot.selfdrive.car.cruise_button_control.mpc import MPH_TO_MS
+from openpilot.sunnypilot.selfdrive.car.cruise_button_control.mpc import MPH_TO_MS, MS_TO_MPH
 from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.controller import (
   IntelligentCruiseButtonManagement)
 
@@ -175,3 +175,85 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     a_min_slow = p.cruise_button_mpc.p.a_min_at(13.0)
     a_min_fast = p.cruise_button_mpc.p.a_min_at(35.0)
     assert a_min_fast < a_min_slow
+
+
+class TestTargetRespectsSetSpeed(OpenpilotTestCase):
+  """
+  longitudinalPlan.speeds is not bounded by the set speed. Upstream moved the
+  cruise limit out of the MPC (commaai/openpilot#38367), so the trajectory is the
+  lead-following solution alone and the set speed is applied separately as an
+  acceleration limit. Chasing it unclamped drove the setpoint past the set speed
+  by up to 14mph on the road.
+  """
+
+  def make_planner(self, v_cruise_kph):
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
+    from openpilot.sunnypilot.selfdrive.car.cruise_button_control.controller import CruiseButtonController
+    from openpilot.sunnypilot.selfdrive.car.cruise_button_control.mpc import MpcConfig
+    from openpilot.sunnypilot.selfdrive.car.cruise_button_control.plant import PlantParams
+    from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
+
+    p = object.__new__(LongitudinalPlannerSP)
+    p.events_sp = EventsSP()
+    p.cruise_button_mpc = CruiseButtonController(PlantParams(), MpcConfig())
+    p.cruise_button = SendButtonState.none
+    p._cb_t = 0.0
+    p._decel_short_frames = 0
+    p.v_desired_trajectory = None
+    self._v_cruise_kph = v_cruise_kph
+    return p
+
+  def _sm(self, v_ego, v_cruise_kph, setpoint_mph=None):
+    """setpoint defaults to roughly what would hold the current speed, so the
+    planner starts from a consistent state rather than one already commanding a
+    large change."""
+    cs = structs.CarState()
+    cs.vEgo = v_ego
+    cs.aEgo = 0.0
+    cs.vCruise = v_cruise_kph
+    if setpoint_mph is None:
+      setpoint_mph = v_ego * MS_TO_MPH + 2.0  # ~ the speedo offset
+    cs.cruiseState.speedCluster = setpoint_mph * MPH_TO_MS
+    cc = structs.CarControl()
+    cc.enabled = True
+    return {"carState": cs, "carControl": cc}
+
+  def test_does_not_press_up_when_plan_exceeds_set_speed(self):
+    """
+    The exact on-road failure: the car is already at the set speed but the
+    trajectory asks for much more. Every tick is inspected, not just the last --
+    the press cooldown leaves most ticks idle, so sampling only the final value
+    hides the bug.
+    """
+    kph = 45.0 / 0.621371          # set speed 45mph
+    p = self.make_planner(kph)
+    v_ego = 45.0 * MPH_TO_MS
+    # trajectory asking for 60mph, well above the 45mph set speed
+    p.v_desired_trajectory = np.full(17, 60.0 * MPH_TO_MS)
+    seen = []
+    for _ in range(30):
+      p.update_cruise_button(self._sm(v_ego, kph))
+      seen.append(p.cruise_button)
+    ups = sum(1 for b in seen if b == SendButtonState.increase)
+    assert ups == 0, f"pressed up past the set speed {ups} times"
+
+  def test_still_presses_up_below_set_speed(self):
+    """Clamping must not break normal acceleration toward the set speed."""
+    kph = 60.0 / 0.621371
+    p = self.make_planner(kph)
+    v_ego = 45.0 * MPH_TO_MS
+    p.v_desired_trajectory = np.full(17, 55.0 * MPH_TO_MS)
+    seen = set()
+    for _ in range(30):
+      p.update_cruise_button(self._sm(v_ego, kph))
+      seen.add(p.cruise_button)
+    assert SendButtonState.increase in seen, "clamp broke normal acceleration"
+
+  def test_unset_cruise_does_not_clamp_to_zero(self):
+    """V_CRUISE_UNSET must not be treated as a real ceiling."""
+    from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
+    p = self.make_planner(V_CRUISE_UNSET)
+    p.v_desired_trajectory = np.full(17, 30.0)
+    p.update_cruise_button(self._sm(29.0, V_CRUISE_UNSET))
+    assert p.cruise_button in (SendButtonState.none, SendButtonState.increase,
+                               SendButtonState.decrease)

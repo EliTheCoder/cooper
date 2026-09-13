@@ -11,7 +11,7 @@ from openpilot.cereal import messaging, custom
 from opendbc.car import structs
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
-from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
+from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
 from openpilot.sunnypilot.selfdrive.controls.lib.e2e_alerts_helper import E2EAlertsHelper
@@ -124,6 +124,17 @@ class LongitudinalPlannerSP:
     plan_t = np.array(ModelConstants.T_IDXS[:len(speeds)], dtype=np.float64)
     grid = np.arange(cfg.n_steps) * cfg.dt
     v_des = np.interp(grid, plan_t, np.asarray(speeds, dtype=np.float64))
+
+    # v_desired_trajectory is NOT bounded by the set speed. Upstream moved the
+    # cruise limit out of the MPC (commaai/openpilot#38367): the trajectory is now
+    # the lead-following solution alone, and the set speed is enforced separately
+    # as an acceleration limit via get_cruise_accel(). Chasing the raw trajectory
+    # therefore drives the setpoint straight past the set speed -- measured at
+    # +6.8mph mean and +14mph peak over a drive, which is what made the car creep
+    # up and then demand more braking than coasting could give.
+    v_cruise_kph = min(float(cs.vCruise), V_CRUISE_MAX)
+    if v_cruise_kph < V_CRUISE_UNSET:
+      v_des = np.minimum(v_des, v_cruise_kph * CV.KPH_TO_MS)
 
     self._cb_t += cfg.dt
     ready = bool(cc.enabled and not cc.cruiseControl.override and

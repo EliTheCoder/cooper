@@ -54,7 +54,16 @@ class VCruiseHelper(VCruiseHelperSP):
     _enabled = self.update_enabled_state(CS, enabled)
 
     if CS.cruiseState.available:
-      if not self.CP.pcmCruise or (not self.CP_SP.pcmCruiseSpeed and _enabled):
+      # Whenever openpilot owns the set speed, keep it -- never read it back from
+      # the car. With ICBM the car's setpoint is an *actuator* the button planner
+      # drives above the target (by the speedo offset, and further while dithering),
+      # so sampling it here forms a feedback loop: every frame with _enabled False,
+      # including the first frames of each engage, adopted the inflated setpoint as
+      # the new target and ratcheted the speed upward. It also silently overwrote
+      # the value initialize_v_cruise() had just set, which is why SET never gained
+      # its headroom. _update_v_cruise_non_pcm() no-ops while disengaged, so the
+      # set speed simply holds until initialize_v_cruise() seeds it on engage.
+      if not self.CP.pcmCruise or not self.CP_SP.pcmCruiseSpeed:
         # if stock cruise is completely disabled, then we can use our own set speed logic
         self._update_v_cruise_non_pcm(CS, _enabled, is_metric)
         self.update_speed_limit_assist_v_cruise_non_pcm()
