@@ -120,7 +120,7 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     p.a_desired_trajectory = np.full(17, -0.1)
     for _ in range(40):
       p.events_sp.clear()
-      p.update_decel_authority(True, v)
+      p.update_decel_authority(True, v, 0.0, -1)
     assert not self._raised(p)
 
   def test_warns_when_plan_exceeds_coast_authority(self):
@@ -129,7 +129,7 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     p.a_desired_trajectory = np.full(17, -3.0)  # hard braking, impossible by coasting
     for _ in range(40):
       p.events_sp.clear()
-      p.update_decel_authority(True, v)
+      p.update_decel_authority(True, v, 0.0, -1)
     assert self._raised(p)
 
   def test_debounced_not_instant(self):
@@ -137,7 +137,7 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     p = self.make_planner()
     p.a_desired_trajectory = np.full(17, -3.0)
     p.events_sp.clear()
-    p.update_decel_authority(True, 30.0)
+    p.update_decel_authority(True, 30.0, 0.0, -1)
     assert not self._raised(p), "warned on the very first frame"
 
   def test_clears_when_plan_becomes_achievable(self):
@@ -145,11 +145,11 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     p.a_desired_trajectory = np.full(17, -3.0)
     for _ in range(40):
       p.events_sp.clear()
-      p.update_decel_authority(True, 30.0)
+      p.update_decel_authority(True, 30.0, 0.0, -1)
     assert self._raised(p)
     p.a_desired_trajectory = np.full(17, -0.1)
     p.events_sp.clear()
-    p.update_decel_authority(True, 30.0)
+    p.update_decel_authority(True, 30.0, 0.0, -1)
     assert not self._raised(p)
 
   def test_silent_when_not_engaged(self):
@@ -157,7 +157,7 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     p.a_desired_trajectory = np.full(17, -3.0)
     for _ in range(40):
       p.events_sp.clear()
-      p.update_decel_authority(False, 30.0)
+      p.update_decel_authority(False, 30.0, 0.0, -1)
     assert not self._raised(p)
 
   def test_silent_at_crawl(self):
@@ -165,7 +165,7 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     p.a_desired_trajectory = np.full(17, -3.0)
     for _ in range(40):
       p.events_sp.clear()
-      p.update_decel_authority(True, 1.0)
+      p.update_decel_authority(True, 1.0, 0.0, -1)
     assert not self._raised(p)
 
   def test_uses_speed_dependent_authority(self):
@@ -257,3 +257,64 @@ class TestTargetRespectsSetSpeed(OpenpilotTestCase):
     p.update_cruise_button(self._sm(29.0, V_CRUISE_UNSET))
     assert p.cruise_button in (SendButtonState.none, SendButtonState.increase,
                                SendButtonState.decrease)
+
+
+class TestDecelWarningIsTiedToReality(OpenpilotTestCase):
+  """
+  The warning must mean "I am doing all I can and still losing ground", not
+  "some point in the next 2.5s looks steep". The original version fired on
+  predictions the car went on to satisfy, and while the planner was pressing up.
+  """
+
+  def make_planner(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
+    from openpilot.sunnypilot.selfdrive.car.cruise_button_control.controller import CruiseButtonController
+    from openpilot.sunnypilot.selfdrive.car.cruise_button_control.mpc import MpcConfig
+    from openpilot.sunnypilot.selfdrive.car.cruise_button_control.plant import PlantParams
+    from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
+
+    p = object.__new__(LongitudinalPlannerSP)
+    p.events_sp = EventsSP()
+    p.cruise_button_mpc = CruiseButtonController(PlantParams(), MpcConfig())
+    p._decel_short_frames = 0
+    return p
+
+  @staticmethod
+  def _raised(p):
+    from openpilot.cereal import custom
+    name = custom.OnroadEventSP.EventName.insufficientDecelAuthority
+    return any(e.name == name for e in p.events_sp.to_msg())
+
+  def _run(self, p, a_plan, a_ego, action, n=40, v=30.0):
+    p.a_desired_trajectory = a_plan
+    for _ in range(n):
+      p.events_sp.clear()
+      p.update_decel_authority(True, v, a_ego, action)
+    return self._raised(p)
+
+  def test_silent_while_planner_is_pressing_up(self):
+    """If the planner wants to go faster it is not out of authority."""
+    p = self.make_planner()
+    assert not self._run(p, np.full(17, -3.0), a_ego=0.0, action=1)
+
+  def test_silent_when_car_is_already_slowing_enough(self):
+    """Plan wants -3.0 and the car is doing -3.2: nothing is wrong."""
+    p = self.make_planner()
+    assert not self._run(p, np.full(17, -3.0), a_ego=-3.2, action=-1)
+
+  def test_warns_when_at_limit_and_losing_ground(self):
+    p = self.make_planner()
+    assert self._run(p, np.full(17, -3.0), a_ego=0.0, action=-1)
+
+  def test_ignores_a_dip_beyond_the_near_horizon(self):
+    """A steep point at 2.5s must not raise it; only the near term counts."""
+    p = self.make_planner()
+    a_plan = np.full(17, -0.1)
+    a_plan[-2:] = -3.0          # far end of the trajectory only
+    assert not self._run(p, a_plan, a_ego=0.0, action=-1)
+
+  def test_warns_on_a_near_term_demand(self):
+    p = self.make_planner()
+    a_plan = np.full(17, -0.1)
+    a_plan[:6] = -3.0           # within the first ~0.25s
+    assert self._run(p, a_plan, a_ego=0.0, action=-1)

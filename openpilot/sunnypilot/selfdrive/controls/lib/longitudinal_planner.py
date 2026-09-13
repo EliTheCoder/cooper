@@ -36,6 +36,11 @@ EventNameSP = custom.OnroadEventSP.EventName
 DECEL_AUTHORITY_MARGIN = 0.15   # m/s^2
 DECEL_WARN_FRAMES = 10          # 0.5s at the 20Hz model rate
 DECEL_WARN_MIN_SPEED = 5.0      # m/s, no point warning at a crawl
+# Only the near-term plan matters. Taking the minimum over the full 2.5s made a
+# single dip at the far end raise the alert while the car was tracking fine and
+# the planner was not even asking to slow -- which is what made the warning look
+# unrelated to what the car was doing.
+DECEL_WARN_HORIZON = 1.5        # s
 
 
 class LongitudinalPlannerSP:
@@ -139,7 +144,6 @@ class LongitudinalPlannerSP:
     self._cb_t += cfg.dt
     ready = bool(cc.enabled and not cc.cruiseControl.override and
                  not cc.cruiseControl.cancel and not cc.cruiseControl.resume)
-    self.update_decel_authority(ready, float(cs.vEgo))
     driver_pressing = any(b.pressed for b in cs.buttonEvents)
 
     st = self.cruise_button_mpc.update(self._cb_t, float(cs.vEgo), float(cs.aEgo),
@@ -152,22 +156,39 @@ class LongitudinalPlannerSP:
     else:
       self.cruise_button = SendButtonState.none
 
-  def update_decel_authority(self, ready: bool, v_ego: float) -> None:
-    """
-    Warn when the plan asks for more braking than coasting can provide.
+    # After the decision, so the alert reflects what was just commanded.
+    self.update_decel_authority(ready, float(cs.vEgo), float(cs.aEgo), st.action)
 
-    The planner solves as though it can brake; on a car driven only through the
-    cruise buttons it cannot. When the two disagree the car closes on the lead and
-    the driver has to intervene, so say so instead of failing silently.
+  def update_decel_authority(self, ready: bool, v_ego: float, a_ego: float, action: int) -> None:
+    """
+    Warn when the buttons are already doing all they can and the car is still not
+    slowing as fast as the plan needs.
+
+    The planner solves as though it can brake; driven only through the cruise
+    buttons it cannot. Rather than warning on any steep-looking point in the plan,
+    require all three of:
+
+      * the near-term plan needs more deceleration than coasting can provide,
+      * the planner is not asking to go faster (so it is already doing its best),
+      * the car is measurably not decelerating as hard as the plan needs.
+
+    The third condition is what ties the alert to reality: without it the warning
+    fired on predictions the car went on to satisfy anyway.
     """
     a_plan = getattr(self, 'a_desired_trajectory', None)
     if not ready or a_plan is None or len(a_plan) == 0 or v_ego < DECEL_WARN_MIN_SPEED:
       self._decel_short_frames = 0
       return
 
-    required = float(np.min(a_plan))
+    n = int(np.searchsorted(ModelConstants.T_IDXS[:len(a_plan)], DECEL_WARN_HORIZON, side="right"))
+    required = float(np.min(a_plan[:max(n, 1)]))
     available = float(self.cruise_button_mpc.p.a_min_at(v_ego))
-    if required < available - DECEL_AUTHORITY_MARGIN:
+
+    beyond_authority = required < available - DECEL_AUTHORITY_MARGIN
+    doing_our_best = action <= 0
+    falling_short = a_ego > required + DECEL_AUTHORITY_MARGIN
+
+    if beyond_authority and doing_our_best and falling_short:
       self._decel_short_frames += 1
     else:
       self._decel_short_frames = 0

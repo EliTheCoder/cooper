@@ -90,7 +90,13 @@ class VCruiseHelperSP:
       self.v_cruise_min = V_CRUISE_MIN
       return
 
-    self.v_cruise_min = get_minimum_set_speed(is_metric)
+    # get_minimum_set_speed() returns the floor in DISPLAY units (20mph / 30kph),
+    # but v_cruise_min is compared against v_cruise_kph. Imperial therefore applied
+    # 20 as kph = 12.4mph, letting the set speed drop below the 20mph floor the car
+    # will actually accept -- the buttons then clamp and hold a target they can
+    # never reach. Metric was already correct.
+    v_min = get_minimum_set_speed(is_metric)
+    self.v_cruise_min = v_min if is_metric else v_min * CV.MPH_TO_KPH
 
   def update_enabled_state(self, CS: car.CarState, enabled: bool) -> bool:
     # special enabled state for non pcmCruiseSpeed, unchanged for non pcmCruise

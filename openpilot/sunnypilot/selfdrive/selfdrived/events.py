@@ -268,6 +268,11 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       "BRAKE",
       "Cruise Cannot Slow Fast Enough",
       AlertStatus.userPrompt, AlertSize.mid,
-      Priority.MID, VisualAlert.none, AudibleAlert.promptRepeat, 2.),
+      # Short duration on purpose. Alerts latch for at least `duration`, so the 2s
+      # used by steerSaturated left this one on screen for up to two seconds after
+      # the driver had already braked and the condition had cleared. The event is
+      # re-added every 20Hz plannerd tick while it holds, so 0.2s displays
+      # continuously when it matters and clears as soon as the driver acts.
+      Priority.MID, VisualAlert.none, AudibleAlert.promptRepeat, 0.2),
   },
 }
