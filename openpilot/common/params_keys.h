@@ -170,6 +170,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"IntelligentCruiseButtonManagement", {PERSISTENT | BACKUP , BOOL}},
     // Use the MPC button planner instead of ICBM's round-then-relay state machine
     {"CruiseButtonMpc", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // Let the e2e model pull the button target down for junctions/roundabouts
+    {"CruiseButtonE2eCoast", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"InteractivityTimeout", {PERSISTENT | BACKUP, INT, "0"}},
     {"IsDevelopmentBranch", {CLEAR_ON_MANAGER_START, BOOL}},
     {"IsReleaseSpBranch", {CLEAR_ON_MANAGER_START, BOOL}},

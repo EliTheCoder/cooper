@@ -200,6 +200,9 @@ class TestTargetRespectsSetSpeed(OpenpilotTestCase):
     p._cb_t = 0.0
     p._decel_short_frames = 0
     p.v_desired_trajectory = None
+    p.output_v_target = 0.0
+    p.e2e_coast_enabled = False
+    p.e2e_coast_active = False
     self._v_cruise_kph = v_cruise_kph
     return p
 
@@ -216,7 +219,9 @@ class TestTargetRespectsSetSpeed(OpenpilotTestCase):
     cs.cruiseState.speedCluster = setpoint_mph * MPH_TO_MS
     cc = structs.CarControl()
     cc.enabled = True
-    return {"carState": cs, "carControl": cc}
+    model = type("M", (), {"action": type("A", (), {
+      "desiredAcceleration": 0.0, "shouldStop": False, "desiredCurvature": 0.0})()})()
+    return {"carState": cs, "carControl": cc, "modelV2": model}
 
   def test_does_not_press_up_when_plan_exceeds_set_speed(self):
     """
@@ -318,3 +323,92 @@ class TestDecelWarningIsTiedToReality(OpenpilotTestCase):
     a_plan = np.full(17, -0.1)
     a_plan[:6] = -3.0           # within the first ~0.25s
     assert self._run(p, a_plan, a_ego=0.0, action=-1)
+
+
+class TestE2eCoast(OpenpilotTestCase):
+  """
+  The e2e model anticipates junctions and roundabouts the ACC planner cannot see
+  (measured: it asked to slow before 21 of 26 curvature events, median lead 9.9s)
+  but asks for far more deceleration than coasting can deliver (median -0.72 m/s^2
+  against -0.19 available). It must be clamped, not followed.
+  """
+
+  def make_planner(self, enabled=True):
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
+    from openpilot.sunnypilot.selfdrive.car.cruise_button_control.controller import CruiseButtonController
+    from openpilot.sunnypilot.selfdrive.car.cruise_button_control.mpc import MpcConfig
+    from openpilot.sunnypilot.selfdrive.car.cruise_button_control.plant import PlantParams
+
+    p = object.__new__(LongitudinalPlannerSP)
+    p.cruise_button_mpc = CruiseButtonController(PlantParams(), MpcConfig())
+    p.e2e_coast_enabled = enabled
+    p.e2e_coast_active = False
+    return p
+
+  @staticmethod
+  def _sm(a_req):
+    return {"modelV2": type("M", (), {"action": type("A", (), {
+      "desiredAcceleration": a_req, "shouldStop": False, "desiredCurvature": 0.0})()})()}
+
+  def _apply(self, p, a_req, v_ego=20.0, v_target=20.0):
+    cfg = p.cruise_button_mpc.cfg
+    v_des = np.full(cfg.n_steps, v_target)
+    return p.apply_e2e_coast(self._sm(a_req), v_des, v_ego, cfg)
+
+  def test_disabled_is_a_passthrough(self):
+    p = self.make_planner(enabled=False)
+    out = self._apply(p, -1.0)
+    assert np.allclose(out, 20.0)
+
+  def test_positive_request_never_raises_the_target(self):
+    """The model may only ever pull the target down, never push it up."""
+    p = self.make_planner()
+    out = self._apply(p, +1.5)
+    assert out.max() <= 20.0 + 1e-9
+
+  def test_lowers_target_when_model_wants_to_slow(self):
+    p = self.make_planner()
+    out = self._apply(p, -0.6)
+    assert out[-1] < 20.0, "model asked to slow but the target did not drop"
+
+  def test_request_is_clamped_to_coast_authority(self):
+    """A -2 m/s^2 request must not build a target the buttons can never track."""
+    p = self.make_planner()
+    cfg = p.cruise_button_mpc.cfg
+    v_ego = 20.0
+    a_min = float(p.cruise_button_mpc.p.a_min_at(v_ego))
+    out = self._apply(p, -2.0, v_ego=v_ego)
+    horizon = cfg.n_steps * cfg.dt
+    # slope of the produced target cannot exceed what coasting can do
+    slope = (out[-1] - out[0]) / horizon
+    assert slope >= a_min - 1e-6, f"target falls at {slope:.3f}, beyond coast {a_min:.3f}"
+
+  def test_drop_is_bounded_relative_to_acc_target(self):
+    """A request to stop degrades into an early lift, not a crawl."""
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import E2E_COAST_MAX_DROP
+    p = self.make_planner()
+    out = self._apply(p, -4.0, v_ego=30.0, v_target=30.0)
+    assert out.min() >= 30.0 - E2E_COAST_MAX_DROP - 1e-6
+
+  def test_silent_at_low_speed(self):
+    """Near the setpoint floor there is nothing useful to give up."""
+    p = self.make_planner()
+    out = self._apply(p, -1.0, v_ego=5.0, v_target=5.0)
+    assert np.allclose(out, 5.0)
+
+  def test_real_event_profiles(self):
+    """
+    Replayed from logged curvature events on this car. The no-brake cases asked
+    for roughly what coasting provides and should produce a usable target; the
+    braking cases asked for several times more and must still clamp.
+    """
+    p = self.make_planner()
+    for a_req, label in ((-0.25, "driver did not brake (median)"),
+                         (-1.19, "driver braked (median)"),
+                         (-2.29, "worst logged request")):
+      out = self._apply(p, a_req, v_ego=20.0, v_target=20.0)
+      a_min = float(p.cruise_button_mpc.p.a_min_at(20.0))
+      cfg = p.cruise_button_mpc.cfg
+      slope = (out[-1] - out[0]) / (cfg.n_steps * cfg.dt)
+      assert slope >= a_min - 1e-6, f"{label}: target beyond coast authority"
+      assert out[-1] < 20.0, f"{label}: no slowing produced"

@@ -42,6 +42,23 @@ DECEL_WARN_MIN_SPEED = 5.0      # m/s, no point warning at a crawl
 # unrelated to what the car was doing.
 DECEL_WARN_HORIZON = 1.5        # s
 
+# Anticipatory coasting from the end-to-end model.
+#
+# modelV2.action.desiredAcceleration is published every frame regardless of
+# experimental mode -- the ACC planner only ignores it because is_e2e is false
+# without openpilot longitudinal. The model is trained on human driving, so it
+# lifts off for things the ACC MPC cannot see at all: roundabouts, junctions,
+# lights. Measured over 26 curvature events on this car it asked to slow before
+# the event in 21 of them, with a median lead of 9.9s.
+#
+# It routinely asks for far more than coasting can deliver (median -0.72 m/s^2
+# against -0.19 available, 3.4x), so its request is clamped to what the plant can
+# actually do and bounded in how far below the ACC target it may pull. Without
+# that bound a red light would drag the setpoint to its floor, the car would
+# crawl, and every junction would raise the decel alert.
+E2E_COAST_MAX_DROP = 5.0 * CV.MPH_TO_MS   # most the model may pull below the ACC target
+E2E_COAST_MIN_SPEED = 8.0                 # m/s, below this the buttons are near their floor
+
 
 class LongitudinalPlannerSP:
   def __init__(self, CP: structs.CarParams, CP_SP: structs.CarParamsSP, mpc):
@@ -69,6 +86,8 @@ class LongitudinalPlannerSP:
     self.cruise_button = SendButtonState.none
     self._cb_t = 0.0
     self._decel_short_frames = 0
+    self.e2e_coast_enabled = Params().get_bool("CruiseButtonE2eCoast")
+    self.e2e_coast_active = False
 
   def is_e2e(self, sm: messaging.SubMaster) -> bool:
     experimental_mode = sm['selfdriveState'].experimentalMode
@@ -141,6 +160,19 @@ class LongitudinalPlannerSP:
     if v_cruise_kph < V_CRUISE_UNSET:
       v_des = np.minimum(v_des, v_cruise_kph * CV.KPH_TO_MS)
 
+    # Fold in the sunnypilot target (curve slowdown, map, speed limit assist).
+    # update_targets() already reduces these to a single minimum, but it was only
+    # reaching the ACC accel command -- which does nothing on a car where openpilot
+    # has no throttle. Routing it here is what makes those features reach the
+    # buttons at all.
+    sp_target = float(getattr(self, 'output_v_target', 0.0) or 0.0)
+    if sp_target > 1.0:
+      v_des = np.minimum(v_des, sp_target)
+
+    # Anticipatory coasting from the e2e model, clamped to coast authority and
+    # bounded relative to the ACC target.
+    v_des = self.apply_e2e_coast(sm, v_des, float(cs.vEgo), cfg)
+
     self._cb_t += cfg.dt
     ready = bool(cc.enabled and not cc.cruiseControl.override and
                  not cc.cruiseControl.cancel and not cc.cruiseControl.resume)
@@ -158,6 +190,42 @@ class LongitudinalPlannerSP:
 
     # After the decision, so the alert reflects what was just commanded.
     self.update_decel_authority(ready, float(cs.vEgo), float(cs.aEgo), st.action)
+
+  def apply_e2e_coast(self, sm: messaging.SubMaster, v_des: np.ndarray, v_ego: float, cfg) -> np.ndarray:
+    """
+    Let the end-to-end model pull the speed target down, within what coasting can
+    actually deliver.
+
+    The model sees things the ACC planner cannot -- it asks to slow for junctions
+    and roundabouts with no lead car involved. Its raw request is far beyond coast
+    authority, so integrate the *clamped* request instead: the result is a target
+    the buttons can actually track, which starts falling as soon as the model sees
+    the event rather than when the geometry finally bends.
+    """
+    if not getattr(self, 'e2e_coast_enabled', False) or v_ego < E2E_COAST_MIN_SPEED:
+      self.e2e_coast_active = False
+      return v_des
+
+    a_req = float(sm['modelV2'].action.desiredAcceleration)
+    if not np.isfinite(a_req) or a_req >= 0.0:
+      self.e2e_coast_active = False
+      return v_des
+
+    # Only what the plant can do. Asking for the model's raw -1.2 m/s^2 would build
+    # a target the car can never reach, which is how the setpoint ends up parked at
+    # its floor while the decel alert sounds continuously.
+    a_coast = max(a_req, float(self.cruise_button_mpc.p.a_min_at(v_ego)))
+
+    t = np.arange(cfg.n_steps) * cfg.dt
+    v_e2e = v_ego + a_coast * t
+
+    # Never pull more than E2E_COAST_MAX_DROP below what ACC already wants, so a
+    # request to stop degrades into an early lift rather than a crawl.
+    v_e2e = np.maximum(v_e2e, v_des - E2E_COAST_MAX_DROP)
+
+    out = np.minimum(v_des, v_e2e)
+    self.e2e_coast_active = bool(out[-1] < v_des[-1] - 0.05)
+    return out
 
   def update_decel_authority(self, ready: bool, v_ego: float, a_ego: float, action: int) -> None:
     """
