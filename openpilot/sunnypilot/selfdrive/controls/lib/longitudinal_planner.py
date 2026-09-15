@@ -269,6 +269,12 @@ class LongitudinalPlannerSP:
     if self._decel_short_frames >= DECEL_WARN_FRAMES:
       self.events_sp.add(EventNameSP.insufficientDecelAuthority)
 
+  def update(self, sm: messaging.SubMaster) -> None:
+    self.events_sp.clear()
+    self.dec.update(sm)
+    self.e2e_alerts_helper.update(sm, self.events_sp)
+    self.update_cruise_button(sm)
+
   def publish_longitudinal_plan_sp(self, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:
     plan_sp_send = messaging.new_message('longitudinalPlanSP')
 

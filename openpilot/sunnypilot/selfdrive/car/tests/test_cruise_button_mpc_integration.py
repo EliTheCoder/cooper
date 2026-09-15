@@ -410,3 +410,27 @@ class TestE2eCoast(OpenpilotTestCase):
       slope = (out[-1] - out[0]) / (cfg.n_steps * cfg.dt)
       assert slope >= a_min - 1e-6, f"{label}: target beyond coast authority"
       assert out[-1] < 20.0, f"{label}: no slowing produced"
+
+
+class TestPlannerSurface(OpenpilotTestCase):
+  """
+  plannerd calls these by name every cycle. Nothing else in this file does, so a
+  method could be deleted outright and the rest of the suite would still pass --
+  which is exactly how update() was once lost, crashlooping plannerd on the car.
+  """
+
+  def test_methods_plannerd_depends_on_exist(self):
+    import inspect
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
+    for name in ("update", "update_targets", "publish_longitudinal_plan_sp",
+                 "update_cruise_button", "apply_e2e_coast", "update_decel_authority"):
+      assert callable(getattr(LongitudinalPlannerSP, name, None)), f"missing {name}()"
+      assert inspect.isfunction(getattr(LongitudinalPlannerSP, name))
+
+  def test_update_still_drives_the_button_planner(self):
+    """update() must keep calling update_cruise_button, or the buttons go silent
+    while every other test continues to pass."""
+    import inspect
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
+    src = inspect.getsource(LongitudinalPlannerSP.update)
+    assert "update_cruise_button" in src
