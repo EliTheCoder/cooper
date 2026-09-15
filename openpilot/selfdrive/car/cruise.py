@@ -14,9 +14,6 @@ V_CRUISE_MAX = 145
 V_CRUISE_UNSET = 255
 V_CRUISE_INITIAL = 40
 V_CRUISE_INITIAL_EXPERIMENTAL_MODE = 105
-# Headroom added to the current speed when SET seeds the set speed, so the planner
-# starts with room to accelerate rather than pinned at the speed you pressed at.
-SET_SPEED_HEADROOM_KPH = 5.0 * CV.MPH_TO_KPH
 IMPERIAL_INCREMENT = round(CV.MPH_TO_KPH, 1)  # round here to avoid rounding errors incrementing set speed
 
 ButtonEvent = car.CarState.ButtonEvent
@@ -164,12 +161,6 @@ class VCruiseHelper(VCruiseHelperSP):
     if any(b.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for b in CS.buttonEvents) and self.v_cruise_initialized:
       self.v_cruise_kph = self.v_cruise_kph_last
     else:
-      # Seed slightly above the current speed. Setting exactly to vEgo leaves the
-      # planner no headroom: it can only ever hold or slow down, so any request to
-      # go faster needs a manual press. Only applied where openpilot owns the set
-      # speed; when the PCM owns it this branch is unreachable.
-      headroom = SET_SPEED_HEADROOM_KPH if not self.CP_SP.pcmCruiseSpeed else 0.0
-      target = CS.vEgo * CV.MS_TO_KPH + headroom
-      self.v_cruise_kph = int(round(np.clip(target, initial, V_CRUISE_MAX)))
+      self.v_cruise_kph = int(round(np.clip(CS.vEgo * CV.MS_TO_KPH, initial, V_CRUISE_MAX)))
 
     self.v_cruise_cluster_kph = self.v_cruise_kph

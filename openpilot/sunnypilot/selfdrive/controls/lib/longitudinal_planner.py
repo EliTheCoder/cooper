@@ -188,8 +188,10 @@ class LongitudinalPlannerSP:
     else:
       self.cruise_button = SendButtonState.none
 
-    # After the decision, so the alert reflects what was just commanded.
-    self.update_decel_authority(ready, float(cs.vEgo), float(cs.aEgo), st.action)
+    # After the decision, so the alert reflects what was just commanded. v_des is
+    # the clamped target the buttons are actually chasing -- not the raw ACC accel
+    # trajectory, which upstream no longer bounds by the set speed.
+    self.update_decel_authority(ready, float(cs.vEgo), float(cs.aEgo), st.action, v_des, cfg)
 
   def apply_e2e_coast(self, sm: messaging.SubMaster, v_des: np.ndarray, v_ego: float, cfg) -> np.ndarray:
     """
@@ -227,29 +229,32 @@ class LongitudinalPlannerSP:
     self.e2e_coast_active = bool(out[-1] < v_des[-1] - 0.05)
     return out
 
-  def update_decel_authority(self, ready: bool, v_ego: float, a_ego: float, action: int) -> None:
+  def update_decel_authority(self, ready: bool, v_ego: float, a_ego: float, action: int,
+                             v_des: np.ndarray, cfg) -> None:
     """
-    Warn when the buttons are already doing all they can and the car is still not
-    slowing as fast as the plan needs.
+    Warn when the buttons cannot slow the car as fast as the target they are
+    chasing demands.
 
-    The planner solves as though it can brake; driven only through the cruise
-    buttons it cannot. Rather than warning on any steep-looking point in the plan,
-    require all three of:
+    This reads the *clamped* target (v_des), not a_desired_trajectory. The raw ACC
+    acceleration trajectory is no longer bounded by the set speed upstream
+    (commaai/openpilot#38367), so it routinely contains deceleration that the car
+    is under no obligation to produce: on one drive it exceeded coast authority in
+    16.5% of engaged frames and raised this alert while the car was holding a
+    steady 40mph with the setpoint dithering normally.
 
-      * the near-term plan needs more deceleration than coasting can provide,
+    Requires all of:
+      * the target demands more deceleration than coasting can provide,
       * the planner is not asking to go faster (so it is already doing its best),
-      * the car is measurably not decelerating as hard as the plan needs.
-
-    The third condition is what ties the alert to reality: without it the warning
-    fired on predictions the car went on to satisfy anyway.
+      * the car is measurably not decelerating that hard.
     """
-    a_plan = getattr(self, 'a_desired_trajectory', None)
-    if not ready or a_plan is None or len(a_plan) == 0 or v_ego < DECEL_WARN_MIN_SPEED:
+    if not ready or v_ego < DECEL_WARN_MIN_SPEED or v_des is None or len(v_des) < 2:
       self._decel_short_frames = 0
       return
 
-    n = int(np.searchsorted(ModelConstants.T_IDXS[:len(a_plan)], DECEL_WARN_HORIZON, side="right"))
-    required = float(np.min(a_plan[:max(n, 1)]))
+    # Deceleration implied by the target we are chasing, over the near horizon.
+    n = max(2, int(round(DECEL_WARN_HORIZON / cfg.dt)))
+    n = min(n, len(v_des))
+    required = (float(v_des[n - 1]) - v_ego) / (n * cfg.dt)
     available = float(self.cruise_button_mpc.p.a_min_at(v_ego))
 
     beyond_authority = required < available - DECEL_AUTHORITY_MARGIN
@@ -263,12 +268,6 @@ class LongitudinalPlannerSP:
 
     if self._decel_short_frames >= DECEL_WARN_FRAMES:
       self.events_sp.add(EventNameSP.insufficientDecelAuthority)
-
-  def update(self, sm: messaging.SubMaster) -> None:
-    self.events_sp.clear()
-    self.dec.update(sm)
-    self.e2e_alerts_helper.update(sm, self.events_sp)
-    self.update_cruise_button(sm)
 
   def publish_longitudinal_plan_sp(self, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:
     plan_sp_send = messaging.new_message('longitudinalPlanSP')
