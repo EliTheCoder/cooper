@@ -11,6 +11,7 @@ from openpilot.cereal import messaging, custom
 from opendbc.car import structs
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
+from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
@@ -173,7 +174,11 @@ class LongitudinalPlannerSP:
     # bounded relative to the ACC target.
     v_des = self.apply_e2e_coast(sm, v_des, float(cs.vEgo), cfg)
 
-    self._cb_t += cfg.dt
+    # Real elapsed time, not the planner's internal dt. plannerd ticks at the model
+    # rate (DT_MDL, 20Hz) while cfg.dt is the MPC's own 0.1s grid, so advancing by
+    # cfg.dt ran this clock at 2x real time and halved every press interval the
+    # controller thought it was enforcing.
+    self._cb_t += DT_MDL
     ready = bool(cc.enabled and not cc.cruiseControl.override and
                  not cc.cruiseControl.cancel and not cc.cruiseControl.resume)
     driver_pressing = any(b.pressed for b in cs.buttonEvents)
