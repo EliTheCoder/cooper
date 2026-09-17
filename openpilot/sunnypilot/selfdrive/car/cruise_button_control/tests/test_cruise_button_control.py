@@ -16,12 +16,17 @@ class TestPlant(OpenpilotTestCase):
     assert v.shape == a.shape == (20,)
     assert np.all(np.isfinite(v)) and np.all(np.isfinite(a))
 
-  def test_converges_to_setpoint_minus_offset(self):
-    """Steady state speed must land at setpoint - offset; the offset is the ~2mph
-    speedo calibration bias measured on two separate drives."""
+  def test_converges_to_setpoint_over_cluster_ratio(self):
+    """The car regulates its setpoint against its own speedometer, so steady state
+    lands at setpoint / cluster_ratio in true units -- the speedo bias is
+    proportional (measured +0.63mph at 10mph, +2.53 at 74), not a fixed offset."""
     sp = 33.0
     v, _ = rollout(self.p, np.full(4000, sp), 25.0, 0.0, 0.0, 0.05)
-    self.assertAlmostEqual(float(v[-1]), sp - self.p.offset, delta=0.05)
+    self.assertAlmostEqual(float(v[-1]), sp / self.p.cluster_ratio, delta=0.05)
+
+  def test_offset_grows_with_speed(self):
+    """A fixed offset was ~0.7mph wrong at each end of the range."""
+    assert self.p.offset_at(10.0) < self.p.offset_at(30.0)
 
   def test_authority_is_speed_dependent(self):
     """Throttle authority falls with speed, coast authority grows with it."""
@@ -39,7 +44,7 @@ class TestPlant(OpenpilotTestCase):
     """
     dt = 0.05
     n = int(self.p.deadtime / dt)
-    hist = np.full(n + 5, 30.0 + self.p.offset)
+    hist = np.full(n + 5, 30.0 * self.p.cluster_ratio)
     v, _ = rollout(self.p, np.full(300, 40.0), 30.0, 0.0, 0.0, dt, sp_hist=hist)
     assert abs(v[max(n - 2, 0)] - 30.0) < 0.05, "moved before deadtime elapsed"
     assert v[-1] > 30.5, "never responded after deadtime"
@@ -76,13 +81,13 @@ class TestMpc(OpenpilotTestCase):
 
   def test_commands_up_when_target_above(self):
     sp = 70.0
-    v = sp * MPH_TO_MS - self.p.offset
+    v = sp * MPH_TO_MS / self.p.cluster_ratio
     a, _ = self.mpc.plan(np.full(self.mpc.cfg.n_steps, v + 2.0), v, 0.0, sp)
     assert a == 1
 
   def test_commands_down_when_target_below(self):
     sp = 70.0
-    v = sp * MPH_TO_MS - self.p.offset
+    v = sp * MPH_TO_MS / self.p.cluster_ratio
     a, _ = self.mpc.plan(np.full(self.mpc.cfg.n_steps, v - 2.0), v, 0.0, sp)
     assert a == -1
 
@@ -90,7 +95,7 @@ class TestMpc(OpenpilotTestCase):
     """At steady state on an exact increment there is nothing to gain, and the
     press cost should stop it fidgeting."""
     sp = 70.0
-    v = sp * MPH_TO_MS - self.p.offset
+    v = sp * MPH_TO_MS / self.p.cluster_ratio
     acts = [self.mpc.plan(np.full(self.mpc.cfg.n_steps, v), v, 0.0, sp)[0] for _ in range(8)]
     assert sum(a != 0 for a in acts) <= 2
 
@@ -99,7 +104,7 @@ class TestMpc(OpenpilotTestCase):
     offset, or the top of the usable range is silently unreachable. Guards against
     V_CRUISE_MAX or the fitted offset drifting away from this constant."""
     v_cruise_max_mph = 145.0 * 0.621371  # V_CRUISE_MAX kph
-    needed = v_cruise_max_mph + self.p.offset * MS_TO_MPH
+    needed = v_cruise_max_mph + self.p.offset_at(v_cruise_max_mph / MS_TO_MPH) * MS_TO_MPH
     cfg = MpcConfig()
     msg = f"sp_max_mph={cfg.sp_max_mph} cannot hold {v_cruise_max_mph:.1f}mph"
     assert cfg.sp_max_mph >= needed, msg + f" (needs setpoint {needed:.1f}mph)"
@@ -114,7 +119,7 @@ class TestMpc(OpenpilotTestCase):
     cfg = MpcConfig()
     c = CruiseButtonController(self.p, cfg)
     dt = cfg.dt
-    target = (145.0 * 0.621371) * MPH_TO_MS - self.p.offset
+    target = (145.0 * 0.621371) * MPH_TO_MS / self.p.cluster_ratio
     v, a, sp = target - 2.0, 0.0, 88.0
     hist = [sp]
     for i in range(int(60 / dt)):
@@ -187,7 +192,7 @@ class TestController(OpenpilotTestCase):
     cfg = MpcConfig()
     c = CruiseButtonController(self.p, cfg)
     dt = cfg.dt
-    target = 74.5 * MPH_TO_MS - self.p.offset
+    target = 74.5 * MPH_TO_MS / self.p.cluster_ratio
     v, a, sp = target, 0.0, 75.0
     hist = [sp]
     errs = []

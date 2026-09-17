@@ -11,7 +11,7 @@ proportional law on speed error, a first-order actuator lag, and a grade term. E
 parameter means something, which keeps it honest outside the data it was fit on and
 makes it hard for a planner to exploit.
 
-    e(t)  = sp(t - Td) - v(t) - offset
+    e(t)  = sp(t - Td) - v(t) - offset(v)
     u(t)  = clip(K * e(t), a_min, a_max)
     a'(t) = (u(t) - a(t)) / tau  +  k_grade * sin(pitch)
 
@@ -35,21 +35,36 @@ class PlantParams:
   the horizon in MpcConfig if the deadtime comes out much longer, since dithering
   needs usable planning window left after the delay.
 
-  Open-loop speed prediction on held-out windows: 0.20mph rms @1s, 0.34 @2s,
-  0.51 @4s, 0.61 @8s (vs 0.37/0.70/1.23/1.96 for assuming constant speed).
+  Open-loop speed prediction on held-out windows: 0.20mph rms @1s, 0.33 @2s,
+  0.46 @4s, 0.52 @8s (vs 0.37/0.70/1.23/1.96 for assuming constant speed).
+
+  cluster_ratio fits to 1.0305 here; measured directly as vEgoCluster/vEgo over
+  169k samples it is 1.0365. Two independent derivations agreeing to 0.6% is the
+  main evidence that the apparent offset really is the speedometer bias.
   """
   deadtime: float = 0.8000   # s, setpoint change -> measurable response
-  tau: float = 1.1060        # s, first-order accel lag
-  gain: float = 0.3226       # 1/s, accel per m/s of speed error
-  offset: float = 0.8781     # m/s, setpoint reads high vs vEgo (speedo calibration)
-  k_grade: float = -0.8811    # m/s^2 per unit sin(pitch)
+  tau: float = 1.1668        # s, first-order accel lag
+  gain: float = 0.3571       # 1/s, accel per m/s of speed error
+  # The setpoint is expressed in the cluster's units and the car regulates it
+  # against its own speedometer -- measured, it holds its setpoint to within
+  # -0.10mph of vEgoCluster. The apparent "offset" against vEgo is therefore just
+  # the speedometer's bias, which is PROPORTIONAL, not fixed: measured +0.63mph at
+  # 10mph, +1.27 at 30, +2.53 at 74 (about +4% overall). A single constant was
+  # ~0.7mph wrong at each end of the range, larger than the whole dithering
+  # benefit, so this is carried as a ratio and updated live from vEgoCluster/vEgo.
+  cluster_ratio: float = 1.0305   # vEgoCluster / vEgo
+  k_grade: float = -0.9865    # m/s^2 per unit sin(pitch)
   # Authority is strongly speed dependent: throttle authority falls with speed
   # while coast-down authority grows with it (aero drag). A single pair of
   # constants does not generalize across the speed range -- these are affine in v.
-  a_min0: float = -0.0500    # m/s^2 at v=0, coast-down authority
-  a_min_v: float = -0.01464  # m/s^2 per m/s
-  a_max0: float = 0.7073    # m/s^2 at v=0, throttle authority
-  a_max_v: float = -0.01018  # m/s^2 per m/s
+  a_min0: float = -0.1083    # m/s^2 at v=0, coast-down authority
+  a_min_v: float = -0.01405  # m/s^2 per m/s
+  a_max0: float = 0.4618    # m/s^2 at v=0, throttle authority
+  a_max_v: float = -0.00269  # m/s^2 per m/s
+
+  def offset_at(self, v):
+    """Speed-dependent gap between the cluster setpoint and true speed."""
+    return v * (self.cluster_ratio - 1.0)
 
   def a_min_at(self, v):
     return np.minimum(self.a_min0 + self.a_min_v * v, -0.02)
@@ -78,7 +93,7 @@ BOUNDS = np.array([
   (0.80, 2.50),    # deadtime
   (0.05, 3.00),    # tau
   (0.02, 1.50),    # gain
-  (0.00, 2.00),    # offset
+  (1.00, 1.10),    # cluster_ratio
   (-15.0, 0.0),    # k_grade
   (-2.00, -0.05),  # a_min0
   (-0.05, 0.05),   # a_min_v
@@ -99,7 +114,7 @@ def simulate_accel(p: PlantParams, sp: np.ndarray, v: np.ndarray,
     spd[d:] = sp[:n - d]
   else:
     spd[:] = sp
-  e = spd - v - p.offset
+  e = spd - v - p.offset_at(v)
   u = np.clip(p.gain * e, p.a_min_at(v), p.a_max_at(v)) + p.k_grade * np.sin(pitch)
   a = np.empty(n)
   acc = a0
@@ -131,7 +146,7 @@ def rollout(p: PlantParams, sp_seq: np.ndarray, v0: float, a0: float,
   alpha = dt / max(p.tau, 1e-3)
   gterm = p.k_grade * np.sin(pitch)
   for i in range(n):
-    e = spd[i] - vv - p.offset
+    e = spd[i] - vv - p.offset_at(vv)
     u = min(max(p.gain * e, p.a_min_at(vv)), p.a_max_at(vv)) + gterm
     acc += alpha * (u - acc)
     vv += acc * dt

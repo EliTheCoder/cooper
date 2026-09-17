@@ -43,6 +43,11 @@ DECEL_WARN_MIN_SPEED = 5.0      # m/s, no point warning at a crawl
 # unrelated to what the car was doing.
 DECEL_WARN_HORIZON = 1.5        # s
 
+# Speedometer bias tracking. Slow first-order filter: this is a calibration
+# constant, not a signal, so it should settle rather than follow noise.
+CLUSTER_RATIO_MIN_SPEED = 5.0   # m/s, ratio is meaningless at a crawl
+CLUSTER_RATIO_TAU = 0.002       # per 20Hz tick -> ~25s settling
+
 # Anticipatory coasting from the end-to-end model.
 #
 # modelV2.action.desiredAcceleration is published every frame regardless of
@@ -173,6 +178,17 @@ class LongitudinalPlannerSP:
     # Anticipatory coasting from the e2e model, clamped to coast authority and
     # bounded relative to the ACC target.
     v_des = self.apply_e2e_coast(sm, v_des, float(cs.vEgo), cfg)
+
+    # Track the speedometer bias live. The setpoint is in cluster units and the car
+    # regulates it against its own speedometer (measured: it holds to within
+    # -0.10mph of vEgoCluster), so this ratio is the whole of the apparent offset
+    # against vEgo. Measuring it rather than fitting a constant keeps it correct
+    # across the speed range and self-calibrates if tyre size changes.
+    v_cluster = float(cs.vEgoCluster)
+    if cs.vEgo > CLUSTER_RATIO_MIN_SPEED and v_cluster > CLUSTER_RATIO_MIN_SPEED:
+      ratio = float(np.clip(v_cluster / float(cs.vEgo), 1.0, 1.10))
+      p = self.cruise_button_mpc.p
+      p.cluster_ratio += CLUSTER_RATIO_TAU * (ratio - p.cluster_ratio)
 
     # Real elapsed time, not the planner's internal dt. plannerd ticks at the model
     # rate (DT_MDL, 20Hz) while cfg.dt is the MPC's own 0.1s grid, so advancing by

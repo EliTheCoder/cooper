@@ -116,7 +116,7 @@ def _rollout_batch(p: PlantParams, sp_ms: np.ndarray, v0: float, a0: float,
   gterm = p.k_grade * np.sin(pitch)
   out = np.empty((m, n))
   for i in range(n):
-    e = seen[:, i] - v - p.offset
+    e = seen[:, i] - v - p.offset_at(v)
     u = np.clip(p.gain * e, p.a_min_at(v), p.a_max_at(v)) + gterm
     acc += alpha * (u - acc)
     v = v + acc * dt
@@ -221,7 +221,8 @@ class ButtonMpc:
     settles at (setpoint - offset), so drive the setpoint to the target as
     directly as the one-step-per-tick actuator allows.
     """
-    target_mph = (float(np.mean(v_des[-max(1, len(v_des) // 4):])) + self.p.offset) * MS_TO_MPH
+    v_tgt = float(np.mean(v_des[-max(1, len(v_des) // 4):]))
+    target_mph = (v_tgt + self.p.offset_at(v_tgt)) * MS_TO_MPH
     need = int(round(np.clip(target_mph - sp0_mph, -d, d)))
     seq = np.zeros(d, dtype=int)
     step = 1 if need > 0 else -1

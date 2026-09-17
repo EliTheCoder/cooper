@@ -29,9 +29,9 @@ def main():
     dt = cfg.dt
     row = []
     for i, (fn, seconds) in enumerate((
-        (lambda t: (74.5 * MPH_TO_MS) - p.offset, 90.0),
-        (lambda t: (74.0 * MPH_TO_MS) - p.offset, 90.0),
-        (lambda t: (70.0 * MPH_TO_MS) - p.offset + 1.2 * np.sin(2 * np.pi * t / 30.0), 120.0),
+        (lambda t: (74.5 * MPH_TO_MS) / p.cluster_ratio, 90.0),
+        (lambda t: (74.0 * MPH_TO_MS) / p.cluster_ratio, 90.0),
+        (lambda t: (70.0 * MPH_TO_MS) / p.cluster_ratio + 1.2 * np.sin(2 * np.pi * t / 30.0), 120.0),
     )):
       V, SP, DES, PR = run(mpc, p, fn, duration=seconds, seed=i)
       k = int(20.0 / dt)

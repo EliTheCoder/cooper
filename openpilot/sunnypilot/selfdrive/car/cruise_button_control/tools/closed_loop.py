@@ -27,7 +27,7 @@ def run(mpc, p, v_des_fn, duration=90.0, v0=None, sp0=None, pitch=0.0, seed=0):
   v_des0 = v_des_fn(0.0)
   v = v0 if v0 is not None else v_des0
   a = 0.0
-  sp = float(sp0 if sp0 is not None else round((v_des0 + p.offset) * MS_TO_MPH))
+  sp = float(sp0 if sp0 is not None else round((v_des0 + p.offset_at(v_des0)) * MS_TO_MPH))
   hist = [sp] * (int(round(p.deadtime / dt)) + 1)
   last_press = -99.0
 
@@ -77,17 +77,17 @@ def main():
   dt = cfg.dt
 
   # 1. hold a target squarely between two mph increments
-  tgt = (74.5 * MPH_TO_MS) - p.offset   # so steady-state v should be 74.5 mph-equivalent
+  tgt = (74.5 * MPH_TO_MS) / p.cluster_ratio   # so steady-state v should be 74.5 mph-equivalent
   V, SP, DES, PR = run(mpc, p, lambda t: tgt, duration=90.0)
   report("hold speed BETWEEN increments (74.5 mph equivalent)", V, SP, DES, PR, dt)
 
   # 2. hold a target right on an increment (should not dither)
-  tgt2 = (74.0 * MPH_TO_MS) - p.offset
+  tgt2 = (74.0 * MPH_TO_MS) / p.cluster_ratio
   V, SP, DES, PR = run(mpc, p, lambda t: tgt2, duration=90.0, seed=1)
   report("hold speed ON an increment (74.0 mph equivalent)", V, SP, DES, PR, dt)
 
   # 3. moving reference: slow sinusoid, lead-follow proxy
-  base = (70.0 * MPH_TO_MS) - p.offset
+  base = (70.0 * MPH_TO_MS) / p.cluster_ratio
   V, SP, DES, PR = run(mpc, p, lambda t: base + 1.2 * np.sin(2 * np.pi * t / 30.0),
                        duration=120.0, seed=2)
   report("track moving reference (+/-2.7mph, 30s period)", V, SP, DES, PR, dt)
