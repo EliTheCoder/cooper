@@ -212,7 +212,13 @@ class LongitudinalPlannerSP:
     # After the decision, so the alert reflects what was just commanded. v_des is
     # the clamped target the buttons are actually chasing -- not the raw ACC accel
     # trajectory, which upstream no longer bounds by the set speed.
-    self.update_decel_authority(ready, float(cs.vEgo), float(cs.aEgo), st.action, v_des, cfg)
+    # Only a lead makes falling short consequential -- see update_decel_authority.
+    try:
+      has_lead = bool(sm['radarState'].leadOne.present)
+    except Exception:
+      has_lead = False
+    self.update_decel_authority(ready, float(cs.vEgo), float(cs.aEgo), st.action,
+                                v_des, cfg, has_lead)
 
   def apply_e2e_coast(self, sm: messaging.SubMaster, v_des: np.ndarray, v_ego: float, cfg) -> np.ndarray:
     """
@@ -251,7 +257,7 @@ class LongitudinalPlannerSP:
     return out
 
   def update_decel_authority(self, ready: bool, v_ego: float, a_ego: float, action: int,
-                             v_des: np.ndarray, cfg) -> None:
+                             v_des: np.ndarray, cfg, has_lead: bool) -> None:
     """
     Warn when the buttons cannot slow the car as fast as the target they are
     chasing demands.
@@ -264,10 +270,19 @@ class LongitudinalPlannerSP:
     steady 40mph with the setpoint dithering normally.
 
     Requires all of:
+      * a lead car is present, so falling short actually costs something,
       * the target demands more deceleration than coasting can provide,
       * the planner is not asking to go faster (so it is already doing its best),
       * the car is measurably not decelerating that hard.
     """
+    # No lead, no consequence. Lowering the set speed makes the plan ask for brisk
+    # deceleration the buttons cannot match, but the only result is arriving at the
+    # new speed gradually -- worth no alert. With a lead ahead the same shortfall
+    # means closing distance, which is the case this exists to report.
+    if not has_lead:
+      self._decel_short_frames = 0
+      return
+
     if not ready or v_ego < DECEL_WARN_MIN_SPEED or v_des is None or len(v_des) < 2:
       self._decel_short_frames = 0
       return

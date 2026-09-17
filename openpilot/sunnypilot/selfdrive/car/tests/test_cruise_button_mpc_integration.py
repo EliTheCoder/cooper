@@ -121,7 +121,7 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     v_des = v + (-0.1) * (np.arange(cfg.n_steps) * cfg.dt)
     for _ in range(40):
       p.events_sp.clear()
-      p.update_decel_authority(True, v, 0.0, -1, v_des, cfg)
+      p.update_decel_authority(True, v, 0.0, -1, v_des, cfg, True)
     assert not self._raised(p)
 
   def test_warns_when_plan_exceeds_coast_authority(self):
@@ -131,7 +131,7 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     v_des = v + (-3.0) * (np.arange(cfg.n_steps) * cfg.dt)  # impossible by coasting
     for _ in range(40):
       p.events_sp.clear()
-      p.update_decel_authority(True, v, 0.0, -1, v_des, cfg)
+      p.update_decel_authority(True, v, 0.0, -1, v_des, cfg, True)
     assert self._raised(p)
 
   def test_debounced_not_instant(self):
@@ -140,7 +140,7 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     cfg = p.cruise_button_mpc.cfg
     v_des = 30.0 + (-3.0) * (np.arange(cfg.n_steps) * cfg.dt)
     p.events_sp.clear()
-    p.update_decel_authority(True, 30.0, 0.0, -1, v_des, cfg)
+    p.update_decel_authority(True, 30.0, 0.0, -1, v_des, cfg, True)
     assert not self._raised(p), "warned on the very first frame"
 
   def test_clears_when_plan_becomes_achievable(self):
@@ -149,11 +149,11 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     v_des = 30.0 + (-3.0) * (np.arange(cfg.n_steps) * cfg.dt)
     for _ in range(40):
       p.events_sp.clear()
-      p.update_decel_authority(True, 30.0, 0.0, -1, v_des, cfg)
+      p.update_decel_authority(True, 30.0, 0.0, -1, v_des, cfg, True)
     assert self._raised(p)
     v_des = 30.0 + (-0.1) * (np.arange(cfg.n_steps) * cfg.dt)
     p.events_sp.clear()
-    p.update_decel_authority(True, 30.0, 0.0, -1, v_des, cfg)
+    p.update_decel_authority(True, 30.0, 0.0, -1, v_des, cfg, True)
     assert not self._raised(p)
 
   def test_silent_when_not_engaged(self):
@@ -162,7 +162,7 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     v_des = 30.0 + (-3.0) * (np.arange(cfg.n_steps) * cfg.dt)
     for _ in range(40):
       p.events_sp.clear()
-      p.update_decel_authority(False, 30.0, 0.0, -1, v_des, cfg)
+      p.update_decel_authority(False, 30.0, 0.0, -1, v_des, cfg, True)
     assert not self._raised(p)
 
   def test_silent_at_crawl(self):
@@ -171,7 +171,7 @@ class TestDecelAuthorityWarning(OpenpilotTestCase):
     v_des = 1.0 + (-3.0) * (np.arange(cfg.n_steps) * cfg.dt)
     for _ in range(40):
       p.events_sp.clear()
-      p.update_decel_authority(True, 1.0, 0.0, -1, v_des, cfg)
+      p.update_decel_authority(True, 1.0, 0.0, -1, v_des, cfg, True)
     assert not self._raised(p)
 
   def test_uses_speed_dependent_authority(self):
@@ -303,7 +303,7 @@ class TestDecelWarningIsTiedToReality(OpenpilotTestCase):
     v_des = v + a_req * t
     for _ in range(n):
       p.events_sp.clear()
-      p.update_decel_authority(True, v, a_ego, action, v_des, cfg)
+      p.update_decel_authority(True, v, a_ego, action, v_des, cfg, True)
     return self._raised(p)
 
   def test_silent_while_planner_is_pressing_up(self):
@@ -434,3 +434,54 @@ class TestPlannerSurface(OpenpilotTestCase):
     from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
     src = inspect.getsource(LongitudinalPlannerSP.update)
     assert "update_cruise_button" in src
+
+
+class TestDecelWarningNeedsALead(OpenpilotTestCase):
+  """
+  Falling short of the plan only matters when something is ahead. Lowering the
+  set speed makes the plan ask for brisk deceleration the buttons cannot match,
+  but the only consequence is reaching the new speed gradually.
+  """
+
+  def make_planner(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
+    from openpilot.sunnypilot.selfdrive.car.cruise_button_control.controller import CruiseButtonController
+    from openpilot.sunnypilot.selfdrive.car.cruise_button_control.mpc import MpcConfig
+    from openpilot.sunnypilot.selfdrive.car.cruise_button_control.plant import PlantParams
+    from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
+
+    p = object.__new__(LongitudinalPlannerSP)
+    p.events_sp = EventsSP()
+    p.cruise_button_mpc = CruiseButtonController(PlantParams(), MpcConfig())
+    p._decel_short_frames = 0
+    return p
+
+  @staticmethod
+  def _raised(p):
+    from openpilot.cereal import custom
+    name = custom.OnroadEventSP.EventName.insufficientDecelAuthority
+    return any(e.name == name for e in p.events_sp.to_msg())
+
+  def _run(self, p, has_lead, v=30.0, a_req=-3.0):
+    cfg = p.cruise_button_mpc.cfg
+    v_des = v + a_req * (np.arange(cfg.n_steps) * cfg.dt)
+    for _ in range(40):
+      p.events_sp.clear()
+      p.update_decel_authority(True, v, 0.0, -1, v_des, cfg, has_lead)
+    return self._raised(p)
+
+  def test_silent_with_no_lead(self):
+    """Lowering the set speed on an empty road must not warn."""
+    assert not self._run(self.make_planner(), has_lead=False)
+
+  def test_warns_with_a_lead(self):
+    assert self._run(self.make_planner(), has_lead=True)
+
+  def test_lead_disappearing_clears_the_warning(self):
+    p = self.make_planner()
+    assert self._run(p, has_lead=True)
+    cfg = p.cruise_button_mpc.cfg
+    v_des = 30.0 + (-3.0) * (np.arange(cfg.n_steps) * cfg.dt)
+    p.events_sp.clear()
+    p.update_decel_authority(True, 30.0, 0.0, -1, v_des, cfg, False)
+    assert not self._raised(p)
