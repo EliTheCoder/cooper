@@ -435,6 +435,38 @@ class TestPlannerSurface(OpenpilotTestCase):
     src = inspect.getsource(LongitudinalPlannerSP.update)
     assert "update_cruise_button" in src
 
+  def test_update_rereads_the_e2e_mode(self):
+    """The mode is switched mid-drive from selfdrived; a planner that only read
+    the param at startup would ignore the switch until the next drive."""
+    import inspect
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
+    assert "refresh_e2e_param" in inspect.getsource(LongitudinalPlannerSP.update)
+
+
+class TestE2eParamRefresh(OpenpilotTestCase):
+  def test_picks_up_a_switch_within_a_second(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import (
+      LongitudinalPlannerSP, E2E_PARAM_REFRESH_FRAMES,
+    )
+    vals = {"CruiseButtonE2eCoast": False}
+
+    class FakeParams:
+      def get_bool(self, k):
+        return vals[k]
+
+    p = object.__new__(LongitudinalPlannerSP)
+    p._params = FakeParams()
+    p.e2e_coast_enabled = False
+    p._e2e_param_frame = 0
+
+    vals["CruiseButtonE2eCoast"] = True
+    for _ in range(E2E_PARAM_REFRESH_FRAMES - 1):
+      p.refresh_e2e_param()
+    assert not p.e2e_coast_enabled   # not every tick
+    p.refresh_e2e_param()
+    assert p.e2e_coast_enabled
+    assert E2E_PARAM_REFRESH_FRAMES == 20   # 1s at the 20Hz model rate
+
 
 class TestDecelWarningNeedsALead(OpenpilotTestCase):
   """

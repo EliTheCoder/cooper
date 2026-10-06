@@ -31,6 +31,7 @@ from openpilot.sunnypilot import get_sanitize_int_param
 from openpilot.sunnypilot.selfdrive.car.car_specific import CarSpecificEventsSP
 from openpilot.sunnypilot.selfdrive.car.cruise_helpers import CruiseHelper
 from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.controller import IntelligentCruiseButtonManagement
+from openpilot.sunnypilot.selfdrive.car.cruise_button_control.mode_toggle import CooperModeToggle
 from openpilot.sunnypilot.selfdrive.selfdrived.button_state_tracker import ButtonStateTracker
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 
@@ -179,6 +180,7 @@ class SelfdriveD(CruiseHelper):
 
     self.mads = ModularAssistiveDrivingSystem(self)
     self.icbm = IntelligentCruiseButtonManagement(self.CP, self.CP_SP)
+    self.cooper_mode_toggle = CooperModeToggle(self.params)
 
     self.car_events_sp = CarSpecificEventsSP(self.CP, self.CP_SP)
 
@@ -524,6 +526,7 @@ class SelfdriveD(CruiseHelper):
         self.experimental_mode_switched = False
 
     self.icbm.run(CS, self.sm['carControl'], self.sm['longitudinalPlanSP'], self.is_metric)
+    self.cooper_mode_toggle.update(CS, self.events_sp)
 
   def data_sample(self):
     _car_state = messaging.recv_one(self.car_state_sock)

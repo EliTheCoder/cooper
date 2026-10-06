@@ -362,6 +362,9 @@ struct OnroadEventSP @0xda96579883444c35 {
     # buttons can deliver. On a car without openpilot longitudinal the only decel
     # available is coasting, so a lead braking harder than that needs the driver.
     insufficientDecelAuthority @26;
+    # CooperCruise mode switched by holding CANCEL with cruise off.
+    cooperCruiseE2e @27;
+    cooperCruiseStandard @28;
   }
 }
 

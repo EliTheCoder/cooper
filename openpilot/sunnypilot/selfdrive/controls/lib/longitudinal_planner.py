@@ -64,6 +64,10 @@ CLUSTER_RATIO_TAU = 0.002       # per 20Hz tick -> ~25s settling
 # crawl, and every junction would raise the decel alert.
 E2E_COAST_MAX_DROP = 5.0 * CV.MPH_TO_MS   # most the model may pull below the ACC target
 E2E_COAST_MIN_SPEED = 8.0                 # m/s, below this the buttons are near their floor
+# The mode can be flipped mid-drive (hold CANCEL with cruise off), so the param
+# is re-read rather than latched at startup. Once a second is plenty for a
+# switch made by hand, and keeps the file read off most planner ticks.
+E2E_PARAM_REFRESH_FRAMES = int(1.0 / DT_MDL)
 
 
 class LongitudinalPlannerSP:
@@ -92,7 +96,9 @@ class LongitudinalPlannerSP:
     self.cruise_button = SendButtonState.none
     self._cb_t = 0.0
     self._decel_short_frames = 0
-    self.e2e_coast_enabled = Params().get_bool("CruiseButtonE2eCoast")
+    self._params = Params()
+    self.e2e_coast_enabled = self._params.get_bool("CruiseButtonE2eCoast")
+    self._e2e_param_frame = 0
     self.e2e_coast_active = False
 
   def is_e2e(self, sm: messaging.SubMaster) -> bool:
@@ -305,10 +311,16 @@ class LongitudinalPlannerSP:
     if self._decel_short_frames >= DECEL_WARN_FRAMES:
       self.events_sp.add(EventNameSP.insufficientDecelAuthority)
 
+  def refresh_e2e_param(self) -> None:
+    self._e2e_param_frame = (getattr(self, '_e2e_param_frame', 0) + 1) % E2E_PARAM_REFRESH_FRAMES
+    if self._e2e_param_frame == 0:
+      self.e2e_coast_enabled = self._params.get_bool("CruiseButtonE2eCoast")
+
   def update(self, sm: messaging.SubMaster) -> None:
     self.events_sp.clear()
     self.dec.update(sm)
     self.e2e_alerts_helper.update(sm, self.events_sp)
+    self.refresh_e2e_param()
     self.update_cruise_button(sm)
 
   def publish_longitudinal_plan_sp(self, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:

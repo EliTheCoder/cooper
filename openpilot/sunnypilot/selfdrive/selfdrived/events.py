@@ -275,4 +275,14 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       # continuously when it matters and clears as soon as the driver acts.
       Priority.MID, VisualAlert.none, AudibleAlert.promptRepeat, 0.2),
   },
+
+  # PERMANENT, not WARNING: the switch is made with cruise off, when WARNING
+  # alerts are not shown.
+  EventNameSP.cooperCruiseE2e: {
+    ET.PERMANENT: NormalPermanentAlert("CooperCruise: E2E", duration=1.5),
+  },
+
+  EventNameSP.cooperCruiseStandard: {
+    ET.PERMANENT: NormalPermanentAlert("CooperCruise: Standard", duration=1.5),
+  },
 }
