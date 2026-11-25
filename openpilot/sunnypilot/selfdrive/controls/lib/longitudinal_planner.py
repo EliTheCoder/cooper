@@ -42,6 +42,25 @@ DECEL_WARN_MIN_SPEED = 5.0      # m/s, no point warning at a crawl
 # the planner was not even asking to slow -- which is what made the warning look
 # unrelated to what the car was doing.
 DECEL_WARN_HORIZON = 1.5        # s
+# A lead alone is not enough: sitting behind a car at a steady gap, the plan can
+# still ask for more braking than coasting gives (the gap is a little short of
+# the desired follow distance, or the set speed was just lowered), and the alert
+# fired while nothing was actually getting worse. Only warn while the gap is
+# shrinking. The deadband keeps lead-speed noise around zero from counting --
+# vRel from the vision lead wanders by a few tenths of a m/s at a steady gap.
+LEAD_CLOSING_MIN_SPEED = 0.5    # m/s (~1.1 mph) of closing speed
+# Without a closing lead the alert is still possible, but only for a curve the
+# car is coming into far too fast: the curve slowdown target (vision or map) has
+# to demand far more than coasting gives, for longer. Set-speed and speed-limit
+# drops are left out on purpose. They land as a step in the target, so they look
+# like a huge braking demand, but reaching the new speed gradually costs nothing.
+DECEL_AUTHORITY_MARGIN_NO_LEAD = 1.5   # m/s^2 beyond coast authority
+DECEL_WARN_FRAMES_NO_LEAD = 20         # 1.0s at the 20Hz model rate
+
+
+def lead_is_closing(lead) -> bool:
+  """True when there is a lead and the distance to it is decreasing."""
+  return bool(lead.present) and float(lead.vRel) < -LEAD_CLOSING_MIN_SPEED
 
 # Speedometer bias tracking. Slow first-order filter: this is a calibration
 # constant, not a signal, so it should settle rather than follow noise.
@@ -212,13 +231,22 @@ class LongitudinalPlannerSP:
     # After the decision, so the alert reflects what was just commanded. v_des is
     # the clamped target the buttons are actually chasing -- not the raw ACC accel
     # trajectory, which upstream no longer bounds by the set speed.
-    # Only a lead makes falling short consequential -- see update_decel_authority.
+    # Only closing on a lead makes falling short consequential -- see
+    # update_decel_authority.
     try:
-      has_lead = bool(sm['radarState'].leadOne.present)
+      lead_closing = lead_is_closing(sm['radarState'].leadOne)
     except Exception:
-      has_lead = False
+      lead_closing = False
     self.update_decel_authority(ready, float(cs.vEgo), float(cs.aEgo), st.action,
-                                v_des, cfg, has_lead)
+                                v_des, cfg, lead_closing, self.curve_target())
+
+  def curve_target(self) -> float | None:
+    """The lowest active curve slowdown target (vision or map), or None."""
+    scc = getattr(self, 'scc', None)
+    if scc is None:
+      return None
+    v = min(float(scc.vision.output_v_target), float(scc.map.output_v_target))
+    return v if v < V_CRUISE_UNSET else None
 
   def apply_e2e_coast(self, sm: messaging.SubMaster, v_des: np.ndarray, v_ego: float, cfg) -> np.ndarray:
     """
@@ -257,7 +285,8 @@ class LongitudinalPlannerSP:
     return out
 
   def update_decel_authority(self, ready: bool, v_ego: float, a_ego: float, action: int,
-                             v_des: np.ndarray, cfg, has_lead: bool) -> None:
+                             v_des: np.ndarray, cfg, lead_closing: bool,
+                             v_curve: float | None = None) -> None:
     """
     Warn when the buttons cannot slow the car as fast as the target they are
     chasing demands.
@@ -269,31 +298,42 @@ class LongitudinalPlannerSP:
     16.5% of engaged frames and raised this alert while the car was holding a
     steady 40mph with the setpoint dithering normally.
 
-    Requires all of:
-      * a lead car is present, so falling short actually costs something,
+    Two cases:
+      * closing on a lead: checked against the full target with a small margin,
+        since falling short means the gap keeps shrinking.
+      * otherwise: checked only against the curve slowdown target (v_curve),
+        with a much larger margin and a longer persistence. A steady or opening
+        gap, a lowered set speed, or a speed limit drop never raises it.
+
+    In both cases it requires all of:
       * the target demands more deceleration than coasting can provide,
       * the planner is not asking to go faster (so it is already doing its best),
       * the car is measurably not decelerating that hard.
     """
-    # No lead, no consequence. Lowering the set speed makes the plan ask for brisk
-    # deceleration the buttons cannot match, but the only result is arriving at the
-    # new speed gradually -- worth no alert. With a lead ahead the same shortfall
-    # means closing distance, which is the case this exists to report.
-    if not has_lead:
+    # Without a closing lead, falling short of the full target costs nothing:
+    # lowering the set speed or holding a steady gap only means arriving at the
+    # new speed gradually. A curve taken too fast is the exception, so only the
+    # curve target is checked, and only for a gross shortfall.
+    if lead_closing:
+      target, margin, frames = v_des, DECEL_AUTHORITY_MARGIN, DECEL_WARN_FRAMES
+    elif v_curve is not None and v_des is not None:
+      target = np.full(len(v_des), v_curve)
+      margin, frames = DECEL_AUTHORITY_MARGIN_NO_LEAD, DECEL_WARN_FRAMES_NO_LEAD
+    else:
       self._decel_short_frames = 0
       return
 
-    if not ready or v_ego < DECEL_WARN_MIN_SPEED or v_des is None or len(v_des) < 2:
+    if not ready or v_ego < DECEL_WARN_MIN_SPEED or target is None or len(target) < 2:
       self._decel_short_frames = 0
       return
 
     # Deceleration implied by the target we are chasing, over the near horizon.
     n = max(2, int(round(DECEL_WARN_HORIZON / cfg.dt)))
-    n = min(n, len(v_des))
-    required = (float(v_des[n - 1]) - v_ego) / (n * cfg.dt)
+    n = min(n, len(target))
+    required = (float(target[n - 1]) - v_ego) / (n * cfg.dt)
     available = float(self.cruise_button_mpc.p.a_min_at(v_ego))
 
-    beyond_authority = required < available - DECEL_AUTHORITY_MARGIN
+    beyond_authority = required < available - margin
     doing_our_best = action <= 0
     falling_short = a_ego > required + DECEL_AUTHORITY_MARGIN
 
@@ -302,7 +342,7 @@ class LongitudinalPlannerSP:
     else:
       self._decel_short_frames = 0
 
-    if self._decel_short_frames >= DECEL_WARN_FRAMES:
+    if self._decel_short_frames >= frames:
       self.events_sp.add(EventNameSP.insufficientDecelAuthority)
 
   def refresh_e2e_param(self) -> None:

@@ -494,26 +494,127 @@ class TestDecelWarningNeedsALead(OpenpilotTestCase):
     name = custom.OnroadEventSP.EventName.insufficientDecelAuthority
     return any(e.name == name for e in p.events_sp.to_msg())
 
-  def _run(self, p, has_lead, v=30.0, a_req=-3.0):
+  def _run(self, p, lead_closing, v=30.0, a_req=-3.0):
     cfg = p.cruise_button_mpc.cfg
     v_des = v + a_req * (np.arange(cfg.n_steps) * cfg.dt)
     for _ in range(40):
       p.events_sp.clear()
-      p.update_decel_authority(True, v, 0.0, -1, v_des, cfg, has_lead)
+      p.update_decel_authority(True, v, 0.0, -1, v_des, cfg, lead_closing)
     return self._raised(p)
 
   def test_silent_with_no_lead(self):
     """Lowering the set speed on an empty road must not warn."""
-    assert not self._run(self.make_planner(), has_lead=False)
+    assert not self._run(self.make_planner(), lead_closing=False)
 
-  def test_warns_with_a_lead(self):
-    assert self._run(self.make_planner(), has_lead=True)
+  def test_warns_when_closing_on_a_lead(self):
+    assert self._run(self.make_planner(), lead_closing=True)
 
   def test_lead_disappearing_clears_the_warning(self):
     p = self.make_planner()
-    assert self._run(p, has_lead=True)
+    assert self._run(p, lead_closing=True)
     cfg = p.cruise_button_mpc.cfg
     v_des = 30.0 + (-3.0) * (np.arange(cfg.n_steps) * cfg.dt)
     p.events_sp.clear()
     p.update_decel_authority(True, 30.0, 0.0, -1, v_des, cfg, False)
     assert not self._raised(p)
+
+
+class TestLeadIsClosing(OpenpilotTestCase):
+  """The decel warning only matters while the gap to the lead is shrinking."""
+
+  @staticmethod
+  def _lead(present, v_rel):
+    from openpilot.cereal import log
+    lead = log.RadarState.LeadData.new_message()
+    lead.present = present
+    lead.vRel = v_rel
+    return lead
+
+  def test_no_lead(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import lead_is_closing
+    assert not lead_is_closing(self._lead(False, -5.0))
+
+  def test_steady_gap_is_not_closing(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import lead_is_closing
+    assert not lead_is_closing(self._lead(True, 0.0))
+
+  def test_opening_gap_is_not_closing(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import lead_is_closing
+    assert not lead_is_closing(self._lead(True, 2.0))
+
+  def test_noise_inside_deadband_is_not_closing(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LEAD_CLOSING_MIN_SPEED, lead_is_closing
+    assert not lead_is_closing(self._lead(True, -0.5 * LEAD_CLOSING_MIN_SPEED))
+
+  def test_closing(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LEAD_CLOSING_MIN_SPEED, lead_is_closing
+    assert lead_is_closing(self._lead(True, -2.0 * LEAD_CLOSING_MIN_SPEED))
+
+  def test_closing_stops_the_count(self):
+    """A gap that stops shrinking must reset the persistence counter, not pause it."""
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import DECEL_WARN_FRAMES
+    p = TestDecelWarningNeedsALead.make_planner(self)
+    cfg = p.cruise_button_mpc.cfg
+    v_des = 30.0 + (-3.0) * (np.arange(cfg.n_steps) * cfg.dt)
+    for closing in [True] * (DECEL_WARN_FRAMES - 1) + [False] + [True] * (DECEL_WARN_FRAMES - 1):
+      p.events_sp.clear()
+      p.update_decel_authority(True, 30.0, 0.0, -1, v_des, cfg, closing)
+    assert not TestDecelWarningNeedsALead._raised(p)
+
+
+class TestDecelWarningForCurvesWithoutALead(OpenpilotTestCase):
+  """
+  With no closing lead the alert is still possible, but only when a curve
+  slowdown target demands far more braking than coasting can give.
+  """
+
+  def setup_method(self, method=None):
+    self.p = TestDecelWarningNeedsALead.make_planner(self)
+    self.cfg = self.p.cruise_button_mpc.cfg
+
+  def _v_curve(self, v, excess):
+    """Curve target whose implied decel is `excess` m/s^2 beyond coast authority."""
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import DECEL_WARN_HORIZON
+    n = max(2, int(round(DECEL_WARN_HORIZON / self.cfg.dt)))
+    available = float(self.p.cruise_button_mpc.p.a_min_at(v))
+    return v + (available - excess) * n * self.cfg.dt
+
+  def _frames_to_alert(self, v_curve, v=30.0, max_frames=60):
+    v_des = np.full(self.cfg.n_steps, v)  # the full target is not asking to slow
+    for i in range(1, max_frames + 1):
+      self.p.events_sp.clear()
+      self.p.update_decel_authority(True, v, 0.0, -1, v_des, self.cfg, False, v_curve)
+      if TestDecelWarningNeedsALead._raised(self.p):
+        return i
+    return None
+
+  def test_gross_curve_shortfall_alerts(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import DECEL_AUTHORITY_MARGIN_NO_LEAD
+    assert self._frames_to_alert(self._v_curve(30.0, DECEL_AUTHORITY_MARGIN_NO_LEAD + 0.5)) is not None
+
+  def test_needs_longer_persistence_than_with_a_lead(self):
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import (
+      DECEL_AUTHORITY_MARGIN_NO_LEAD, DECEL_WARN_FRAMES_NO_LEAD)
+    frames = self._frames_to_alert(self._v_curve(30.0, DECEL_AUTHORITY_MARGIN_NO_LEAD + 0.5))
+    assert frames == DECEL_WARN_FRAMES_NO_LEAD
+
+  def test_moderate_curve_shortfall_is_quiet(self):
+    """Beyond coast authority, but well inside the no-lead margin: no alert."""
+    from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import (
+      DECEL_AUTHORITY_MARGIN, DECEL_AUTHORITY_MARGIN_NO_LEAD)
+    excess = (DECEL_AUTHORITY_MARGIN + DECEL_AUTHORITY_MARGIN_NO_LEAD) / 2
+    assert self._frames_to_alert(self._v_curve(30.0, excess)) is None
+
+  def test_no_curve_no_alert(self):
+    assert self._frames_to_alert(None) is None
+
+  def test_curve_target_helper(self):
+    from types import SimpleNamespace
+    from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
+    ctl = lambda v: SimpleNamespace(output_v_target=v)  # noqa: E731
+    self.p.scc = SimpleNamespace(vision=ctl(V_CRUISE_UNSET), map=ctl(V_CRUISE_UNSET))
+    assert self.p.curve_target() is None
+    self.p.scc = SimpleNamespace(vision=ctl(20.0), map=ctl(V_CRUISE_UNSET))
+    assert self.p.curve_target() == 20.0
+    self.p.scc = SimpleNamespace(vision=ctl(20.0), map=ctl(15.0))
+    assert self.p.curve_target() == 15.0
